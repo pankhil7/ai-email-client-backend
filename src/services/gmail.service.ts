@@ -11,62 +11,40 @@ export class GmailService {
   async fetchEmails(accessToken: string, accountId: string, maxResults = 0): Promise<Email[]> {
     const gmail = this.getClient(accessToken);
 
-    // Step 1: Fetch first page of IDs instantly (50 for fast initial load)
-    const firstPage = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: 50,
-      labelIds: ['INBOX'],
-    });
-
-    const firstIds = (firstPage.data.messages || []).map((m) => m.id!);
-    const nextPageToken = firstPage.data.nextPageToken;
-
-    // Step 2: Fetch first 50 email details in parallel immediately
-    const firstEmails = await Promise.all(
-      firstIds.map(async (id) => {
-        const detail = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
-        return this.parseGmailMessage(detail.data, accountId);
-      })
-    );
-
-    const emails = firstEmails.filter(Boolean) as Email[];
-
-    // Step 3: If there are more emails, fetch remaining IDs and details in background
-    if (nextPageToken && maxResults !== 50) {
-      this.fetchRemainingEmails(gmail, accountId, nextPageToken, emails).catch(() => {});
-    }
-
-    return emails;
-  }
-
-  private async fetchRemainingEmails(
-    gmail: any,
-    accountId: string,
-    startPageToken: string,
-    emailsArray: Email[]
-  ): Promise<void> {
-    let nextPageToken: string | undefined = startPageToken;
+    // Step 1: Fetch ALL message IDs (just IDs — very fast, no content)
+    const allIds: string[] = [];
+    let nextPageToken: string | undefined;
 
     do {
-      const listRes: any = await gmail.users.messages.list({
+      const listRes = await gmail.users.messages.list({
         userId: 'me',
         maxResults: 500,
         labelIds: ['INBOX'],
-        pageToken: nextPageToken,
+        ...(nextPageToken && { pageToken: nextPageToken }),
       });
 
       const messages = listRes.data.messages || [];
+      allIds.push(...messages.map((m: any) => m.id as string));
       nextPageToken = listRes.data.nextPageToken || undefined;
 
-      const emails = await Promise.all(
-        messages.map(async (msg: any) => {
-          const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
-          return this.parseGmailMessage(detail.data, accountId);
-        })
-      );
-
-      emailsArray.push(...(emails.filter(Boolean) as Email[]));
+      if (maxResults > 0 && allIds.length >= maxResults) break;
     } while (nextPageToken);
+
+    const idsToFetch = maxResults > 0 ? allIds.slice(0, maxResults) : allIds;
+
+    // Step 2: Fetch full details for all emails in parallel (all at once)
+    const emails = await Promise.all(
+      idsToFetch.map(async (id) => {
+        try {
+          const detail = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+          return this.parseGmailMessage(detail.data, accountId);
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    return emails.filter(Boolean) as Email[];
   }
 
   private parseGmailMessage(msg: any, accountId: string): Email {
@@ -140,10 +118,7 @@ export class GmailService {
       .replace(/\//g, '_')
       .replace(/=+$/, '');
 
-    await gmail.users.messages.send({
-      userId: 'me',
-      requestBody: { raw },
-    });
+    await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
   }
 
   async archiveEmail(accessToken: string, emailId: string): Promise<void> {
@@ -175,9 +150,13 @@ export class GmailService {
     const messages = res.data.messages || [];
 
     const emails = await Promise.all(
-      messages.map(async (msg) => {
-        const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id!, format: 'full' });
-        return this.parseGmailMessage(detail.data, accountId);
+      messages.map(async (msg: any) => {
+        try {
+          const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id!, format: 'full' });
+          return this.parseGmailMessage(detail.data, accountId);
+        } catch {
+          return null;
+        }
       })
     );
 
