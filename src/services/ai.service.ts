@@ -1,11 +1,13 @@
-import Anthropic from '@anthropic-ai/sdk';
+import Groq from 'groq-sdk';
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
+const MODEL = 'llama-3.3-70b-versatile';
 
 export class AIService {
   async summarizeEmail(subject: string, body: string): Promise<string> {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+    const response = await client.chat.completions.create({
+      model: MODEL,
       max_tokens: 150,
       messages: [
         {
@@ -18,12 +20,12 @@ Body: ${body.substring(0, 3000)}`,
       ],
     });
 
-    return (message.content[0] as { type: string; text: string }).text;
+    return response.choices[0]?.message?.content || '';
   }
 
   async draftReply(subject: string, body: string, fromName: string): Promise<string> {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+    const response = await client.chat.completions.create({
+      model: MODEL,
       max_tokens: 400,
       messages: [
         {
@@ -37,12 +39,12 @@ Email: ${body.substring(0, 2000)}`,
       ],
     });
 
-    return (message.content[0] as { type: string; text: string }).text;
+    return response.choices[0]?.message?.content || '';
   }
 
   async prioritizeEmail(subject: string, body: string, from: string): Promise<number> {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-6',
+    const response = await client.chat.completions.create({
+      model: MODEL,
       max_tokens: 10,
       messages: [
         {
@@ -60,15 +62,16 @@ Preview: ${body.substring(0, 500)}`,
       ],
     });
 
-    const text = (message.content[0] as { type: string; text: string }).text.trim();
+    const text = response.choices[0]?.message?.content?.trim() || '5';
     const score = parseInt(text);
     return isNaN(score) ? 5 : Math.min(10, Math.max(1, score));
   }
 
   async *summarizeEmailStream(subject: string, body: string): AsyncGenerator<string> {
-    const stream = await client.messages.stream({
-      model: 'claude-sonnet-4-6',
+    const stream = await client.chat.completions.create({
+      model: MODEL,
       max_tokens: 150,
+      stream: true,
       messages: [
         {
           role: 'user',
@@ -81,19 +84,16 @@ Body: ${body.substring(0, 3000)}`,
     });
 
     for await (const chunk of stream) {
-      if (
-        chunk.type === 'content_block_delta' &&
-        chunk.delta.type === 'text_delta'
-      ) {
-        yield chunk.delta.text;
-      }
+      const text = chunk.choices[0]?.delta?.content;
+      if (text) yield text;
     }
   }
 
   async *draftReplyStream(subject: string, body: string, fromName: string): AsyncGenerator<string> {
-    const stream = await client.messages.stream({
-      model: 'claude-sonnet-4-6',
+    const stream = await client.chat.completions.create({
+      model: MODEL,
       max_tokens: 400,
+      stream: true,
       messages: [
         {
           role: 'user',
@@ -107,12 +107,8 @@ Email: ${body.substring(0, 2000)}`,
     });
 
     for await (const chunk of stream) {
-      if (
-        chunk.type === 'content_block_delta' &&
-        chunk.delta.type === 'text_delta'
-      ) {
-        yield chunk.delta.text;
-      }
+      const text = chunk.choices[0]?.delta?.content;
+      if (text) yield text;
     }
   }
 }
