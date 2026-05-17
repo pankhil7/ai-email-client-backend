@@ -11,40 +11,62 @@ export class GmailService {
   async fetchEmails(accessToken: string, accountId: string, maxResults = 0): Promise<Email[]> {
     const gmail = this.getClient(accessToken);
 
-    // Step 1: Fetch ALL message IDs at once (just IDs, very fast)
-    const allMessageIds: string[] = [];
-    let nextPageToken: string | undefined;
+    // Step 1: Fetch first page of IDs instantly (50 for fast initial load)
+    const firstPage = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: 50,
+      labelIds: ['INBOX'],
+    });
 
-    do {
-      const listRes = await gmail.users.messages.list({
-        userId: 'me',
-        maxResults: 500,
-        labelIds: ['INBOX'],
-        ...(nextPageToken && { pageToken: nextPageToken }),
-      });
+    const firstIds = (firstPage.data.messages || []).map((m) => m.id!);
+    const nextPageToken = firstPage.data.nextPageToken;
 
-      const messages = listRes.data.messages || [];
-      allMessageIds.push(...messages.map((m) => m.id!));
-      nextPageToken = listRes.data.nextPageToken || undefined;
-
-      if (maxResults > 0 && allMessageIds.length >= maxResults) break;
-    } while (nextPageToken);
-
-    const idsToFetch = maxResults > 0 ? allMessageIds.slice(0, maxResults) : allMessageIds;
-
-    // Step 2: Fetch all email details in parallel (all at once, no batching)
-    const emails = await Promise.all(
-      idsToFetch.map(async (id) => {
-        const detail = await gmail.users.messages.get({
-          userId: 'me',
-          id,
-          format: 'full',
-        });
+    // Step 2: Fetch first 50 email details in parallel immediately
+    const firstEmails = await Promise.all(
+      firstIds.map(async (id) => {
+        const detail = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
         return this.parseGmailMessage(detail.data, accountId);
       })
     );
 
-    return emails.filter(Boolean) as Email[];
+    const emails = firstEmails.filter(Boolean) as Email[];
+
+    // Step 3: If there are more emails, fetch remaining IDs and details in background
+    if (nextPageToken && maxResults !== 50) {
+      this.fetchRemainingEmails(gmail, accountId, nextPageToken, emails).catch(() => {});
+    }
+
+    return emails;
+  }
+
+  private async fetchRemainingEmails(
+    gmail: any,
+    accountId: string,
+    startPageToken: string,
+    emailsArray: Email[]
+  ): Promise<void> {
+    let nextPageToken: string | undefined = startPageToken;
+
+    do {
+      const listRes: any = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: 500,
+        labelIds: ['INBOX'],
+        pageToken: nextPageToken,
+      });
+
+      const messages = listRes.data.messages || [];
+      nextPageToken = listRes.data.nextPageToken || undefined;
+
+      const emails = await Promise.all(
+        messages.map(async (msg: any) => {
+          const detail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
+          return this.parseGmailMessage(detail.data, accountId);
+        })
+      );
+
+      emailsArray.push(...(emails.filter(Boolean) as Email[]));
+    } while (nextPageToken);
   }
 
   private parseGmailMessage(msg: any, accountId: string): Email {
