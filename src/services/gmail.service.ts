@@ -8,41 +8,43 @@ export class GmailService {
     return google.gmail({ version: 'v1', auth });
   }
 
-  async fetchEmails(accessToken: string, accountId: string, maxResults = 0, pageToken?: string): Promise<Email[]> {
+  async fetchEmails(accessToken: string, accountId: string, maxResults = 0): Promise<Email[]> {
     const gmail = this.getClient(accessToken);
-    const allEmails: Email[] = [];
-    let nextPageToken: string | undefined = pageToken;
+
+    // Step 1: Fetch ALL message IDs at once (just IDs, very fast)
+    const allMessageIds: string[] = [];
+    let nextPageToken: string | undefined;
 
     do {
       const listRes = await gmail.users.messages.list({
         userId: 'me',
-        maxResults: 500, // Gmail API max per page is 500
+        maxResults: 500,
         labelIds: ['INBOX'],
         ...(nextPageToken && { pageToken: nextPageToken }),
       });
 
       const messages = listRes.data.messages || [];
+      allMessageIds.push(...messages.map((m) => m.id!));
       nextPageToken = listRes.data.nextPageToken || undefined;
 
-      const emails = await Promise.all(
-        messages.map(async (msg) => {
-          const detail = await gmail.users.messages.get({
-            userId: 'me',
-            id: msg.id!,
-            format: 'full',
-          });
-          return this.parseGmailMessage(detail.data, accountId);
-        })
-      );
-
-      allEmails.push(...(emails.filter(Boolean) as Email[]));
-
-      // Stop only if a specific maxResults was requested
-      if (maxResults > 0 && allEmails.length >= maxResults) break;
-
+      if (maxResults > 0 && allMessageIds.length >= maxResults) break;
     } while (nextPageToken);
 
-    return allEmails;
+    const idsToFetch = maxResults > 0 ? allMessageIds.slice(0, maxResults) : allMessageIds;
+
+    // Step 2: Fetch all email details in parallel (all at once, no batching)
+    const emails = await Promise.all(
+      idsToFetch.map(async (id) => {
+        const detail = await gmail.users.messages.get({
+          userId: 'me',
+          id,
+          format: 'full',
+        });
+        return this.parseGmailMessage(detail.data, accountId);
+      })
+    );
+
+    return emails.filter(Boolean) as Email[];
   }
 
   private parseGmailMessage(msg: any, accountId: string): Email {

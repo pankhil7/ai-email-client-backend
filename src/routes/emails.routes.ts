@@ -43,7 +43,6 @@ router.delete('/accounts/:id', (req: Request, res: Response) => {
 router.get('/emails', async (req: Request, res: Response) => {
   const accountId = req.query.accountId as string | undefined;
   const maxResults = parseInt(req.query.maxResults as string) || 0; // 0 = fetch all
-  const pageToken = req.query.pageToken as string | undefined;
 
   try {
     const targetAccounts = accountId
@@ -52,7 +51,7 @@ router.get('/emails', async (req: Request, res: Response) => {
 
     const allEmailsPromises = targetAccounts.map(async (account) => {
       if (account.provider === 'gmail') {
-        return gmailService.fetchEmails(getAccessToken(account), account.id, maxResults, pageToken);
+        return gmailService.fetchEmails(getAccessToken(account), account.id, maxResults);
       } else {
         return imapService.fetchEmails(
           { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
