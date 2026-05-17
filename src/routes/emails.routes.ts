@@ -42,7 +42,7 @@ router.delete('/accounts/:id', (req: Request, res: Response) => {
 // GET /api/v1/emails — fetch unified inbox
 router.get('/emails', async (req: Request, res: Response) => {
   const accountId = req.query.accountId as string | undefined;
-  const maxResults = parseInt(req.query.maxResults as string) || 100;
+  const maxResults = parseInt(req.query.maxResults as string) || 0; // 0 = fetch all
   const pageToken = req.query.pageToken as string | undefined;
 
   try {

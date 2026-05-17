@@ -8,16 +8,15 @@ export class GmailService {
     return google.gmail({ version: 'v1', auth });
   }
 
-  async fetchEmails(accessToken: string, accountId: string, maxResults = 100, pageToken?: string): Promise<Email[]> {
+  async fetchEmails(accessToken: string, accountId: string, maxResults = 0, pageToken?: string): Promise<Email[]> {
     const gmail = this.getClient(accessToken);
     const allEmails: Email[] = [];
     let nextPageToken: string | undefined = pageToken;
-    let fetched = 0;
 
     do {
       const listRes = await gmail.users.messages.list({
         userId: 'me',
-        maxResults: Math.min(maxResults - fetched, 500),
+        maxResults: 500, // Gmail API max per page is 500
         labelIds: ['INBOX'],
         ...(nextPageToken && { pageToken: nextPageToken }),
       });
@@ -37,9 +36,11 @@ export class GmailService {
       );
 
       allEmails.push(...(emails.filter(Boolean) as Email[]));
-      fetched += messages.length;
 
-    } while (nextPageToken && fetched < maxResults);
+      // Stop only if a specific maxResults was requested
+      if (maxResults > 0 && allEmails.length >= maxResults) break;
+
+    } while (nextPageToken);
 
     return allEmails;
   }
