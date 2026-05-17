@@ -1,12 +1,19 @@
 import Groq from 'groq-sdk';
 
-const client = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
 const MODEL = 'llama-3.3-70b-versatile';
 
 export class AIService {
+  private _client: Groq | null = null;
+
+  private get client(): Groq {
+    if (!this._client) {
+      this._client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    }
+    return this._client;
+  }
+
   async summarizeEmail(subject: string, body: string): Promise<string> {
-    const response = await client.chat.completions.create({
+    const response = await this.client.chat.completions.create({
       model: MODEL,
       max_tokens: 150,
       messages: [
@@ -24,7 +31,7 @@ Body: ${body.substring(0, 3000)}`,
   }
 
   async draftReply(subject: string, body: string, fromName: string): Promise<string> {
-    const response = await client.chat.completions.create({
+    const response = await this.client.chat.completions.create({
       model: MODEL,
       max_tokens: 400,
       messages: [
@@ -43,7 +50,7 @@ Email: ${body.substring(0, 2000)}`,
   }
 
   async prioritizeEmail(subject: string, body: string, from: string): Promise<number> {
-    const response = await client.chat.completions.create({
+    const response = await this.client.chat.completions.create({
       model: MODEL,
       max_tokens: 10,
       messages: [
@@ -68,7 +75,7 @@ Preview: ${body.substring(0, 500)}`,
   }
 
   async *summarizeEmailStream(subject: string, body: string): AsyncGenerator<string> {
-    const stream = await client.chat.completions.create({
+    const stream = await this.client.chat.completions.create({
       model: MODEL,
       max_tokens: 150,
       stream: true,
@@ -90,7 +97,7 @@ Body: ${body.substring(0, 3000)}`,
   }
 
   async *draftReplyStream(subject: string, body: string, fromName: string): AsyncGenerator<string> {
-    const stream = await client.chat.completions.create({
+    const stream = await this.client.chat.completions.create({
       model: MODEL,
       max_tokens: 400,
       stream: true,

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { GmailService } from '../services/gmail.service';
 import { ImapService } from '../services/imap.service';
 import { AIService } from '../services/ai.service';
+import { tokenStore } from './auth.routes';
 
 const router = Router();
 const gmailService = new GmailService();
@@ -10,6 +11,15 @@ const aiService = new AIService();
 
 // In-memory account store (in production, use a database)
 const accounts: Map<string, any> = new Map();
+
+// Helper: get access token for gmail account
+function getAccessToken(account: any): string {
+  if (account.provider === 'gmail') {
+    const stored = tokenStore.get(account.id);
+    return stored?.accessToken || account.accessToken || '';
+  }
+  return account.accessToken || '';
+}
 
 // POST /api/v1/accounts — register an account
 router.post('/accounts', (req: Request, res: Response) => {
@@ -40,7 +50,7 @@ router.get('/emails', async (req: Request, res: Response) => {
 
     const allEmailsPromises = targetAccounts.map(async (account) => {
       if (account.provider === 'gmail') {
-        return gmailService.fetchEmails(account.accessToken, account.id);
+        return gmailService.fetchEmails(getAccessToken(account), account.id);
       } else {
         return imapService.fetchEmails(
           { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
@@ -75,7 +85,7 @@ router.get('/emails/search', async (req: Request, res: Response) => {
     const results = await Promise.allSettled(
       targetAccounts.map(async (account) => {
         if (account.provider === 'gmail') {
-          return gmailService.searchEmails(account.accessToken, account.id, query);
+          return gmailService.searchEmails(getAccessToken(account), account.id, query);
         } else {
           return imapService.searchEmails(
             { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
@@ -104,7 +114,7 @@ router.post('/emails/send', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.sendEmail(account.accessToken, payload);
+      await gmailService.sendEmail(getAccessToken(account), payload);
     } else {
       await imapService.sendEmail(
         { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
@@ -125,7 +135,7 @@ router.post('/emails/:id/archive', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.archiveEmail(account.accessToken, req.params.id as string);
+      await gmailService.archiveEmail(getAccessToken(account), req.params.id as string);
     }
     res.json({ success: true });
   } catch (err: any) {
@@ -141,7 +151,7 @@ router.post('/emails/:id/delete', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.deleteEmail(account.accessToken, req.params.id as string);
+      await gmailService.deleteEmail(getAccessToken(account), req.params.id as string);
     }
     res.json({ success: true });
   } catch (err: any) {
@@ -157,7 +167,7 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.markAsRead(account.accessToken, req.params.id as string);
+      await gmailService.markAsRead(getAccessToken(account), req.params.id as string);
     }
     res.json({ success: true });
   } catch (err: any) {
