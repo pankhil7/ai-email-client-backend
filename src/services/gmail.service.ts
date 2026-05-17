@@ -8,30 +8,40 @@ export class GmailService {
     return google.gmail({ version: 'v1', auth });
   }
 
-  async fetchEmails(accessToken: string, accountId: string, maxResults = 50): Promise<Email[]> {
+  async fetchEmails(accessToken: string, accountId: string, maxResults = 100, pageToken?: string): Promise<Email[]> {
     const gmail = this.getClient(accessToken);
+    const allEmails: Email[] = [];
+    let nextPageToken: string | undefined = pageToken;
+    let fetched = 0;
 
-    const listRes = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults,
-      labelIds: ['INBOX'],
-    });
+    do {
+      const listRes = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: Math.min(maxResults - fetched, 500),
+        labelIds: ['INBOX'],
+        ...(nextPageToken && { pageToken: nextPageToken }),
+      });
 
-    const messages = listRes.data.messages || [];
+      const messages = listRes.data.messages || [];
+      nextPageToken = listRes.data.nextPageToken || undefined;
 
-    const emails = await Promise.all(
-      messages.map(async (msg) => {
-        const detail = await gmail.users.messages.get({
-          userId: 'me',
-          id: msg.id!,
-          format: 'full',
-        });
+      const emails = await Promise.all(
+        messages.map(async (msg) => {
+          const detail = await gmail.users.messages.get({
+            userId: 'me',
+            id: msg.id!,
+            format: 'full',
+          });
+          return this.parseGmailMessage(detail.data, accountId);
+        })
+      );
 
-        return this.parseGmailMessage(detail.data, accountId);
-      })
-    );
+      allEmails.push(...(emails.filter(Boolean) as Email[]));
+      fetched += messages.length;
 
-    return emails.filter(Boolean) as Email[];
+    } while (nextPageToken && fetched < maxResults);
+
+    return allEmails;
   }
 
   private parseGmailMessage(msg: any, accountId: string): Email {

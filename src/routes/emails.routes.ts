@@ -42,6 +42,8 @@ router.delete('/accounts/:id', (req: Request, res: Response) => {
 // GET /api/v1/emails — fetch unified inbox
 router.get('/emails', async (req: Request, res: Response) => {
   const accountId = req.query.accountId as string | undefined;
+  const maxResults = parseInt(req.query.maxResults as string) || 100;
+  const pageToken = req.query.pageToken as string | undefined;
 
   try {
     const targetAccounts = accountId
@@ -50,11 +52,12 @@ router.get('/emails', async (req: Request, res: Response) => {
 
     const allEmailsPromises = targetAccounts.map(async (account) => {
       if (account.provider === 'gmail') {
-        return gmailService.fetchEmails(getAccessToken(account), account.id);
+        return gmailService.fetchEmails(getAccessToken(account), account.id, maxResults, pageToken);
       } else {
         return imapService.fetchEmails(
           { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
-          account.id
+          account.id,
+          maxResults
         );
       }
     });
