@@ -395,6 +395,43 @@ router.post('/emails/:id/read', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// GET /api/v1/emails/labels — fetch all saved labels
+router.get('/emails/labels', async (req, res) => {
+    try {
+        const { rows } = await db_1.default.query('SELECT email_id, label FROM email_labels');
+        res.json(rows);
+    }
+    catch (err) {
+        logger_1.default.error('/emails/labels GET failed', { message: err.message, stack: err.stack });
+        res.status(500).json({ error: err.message });
+    }
+});
+// POST /api/v1/emails/:id/labels — save a label for an email
+router.post('/emails/:id/labels', async (req, res) => {
+    const { label } = req.body;
+    const emailId = req.params.id;
+    try {
+        await db_1.default.query('INSERT INTO email_labels (email_id, label) VALUES ($1, $2) ON CONFLICT DO NOTHING', [emailId, label]);
+        res.json({ success: true });
+    }
+    catch (err) {
+        logger_1.default.error('/emails/:id/labels POST failed', { message: err.message, stack: err.stack });
+        res.status(500).json({ error: err.message });
+    }
+});
+// DELETE /api/v1/emails/:id/labels/:label — remove a label from an email
+router.delete('/emails/:id/labels/:label', async (req, res) => {
+    const emailId = req.params.id;
+    const label = req.params.label;
+    try {
+        await db_1.default.query('DELETE FROM email_labels WHERE email_id = $1 AND label = $2', [emailId, label]);
+        res.json({ success: true });
+    }
+    catch (err) {
+        logger_1.default.error('/emails/:id/labels DELETE failed', { message: err.message, stack: err.stack });
+        res.status(500).json({ error: err.message });
+    }
+});
 // POST /api/v1/ai/label — classify email into a label
 router.post('/ai/label', async (req, res) => {
     const { subject, body } = req.body;

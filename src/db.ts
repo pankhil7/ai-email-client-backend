@@ -38,6 +38,14 @@ export async function initDb(): Promise<void> {
     )
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_labels (
+      email_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      PRIMARY KEY (email_id, label)
+    )
+  `);
+
   logger.info('Database initialized');
 }
 

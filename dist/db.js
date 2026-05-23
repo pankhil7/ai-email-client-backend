@@ -39,6 +39,13 @@ async function initDb() {
       expires_at TIMESTAMP NOT NULL
     )
   `);
+    await pool.query(`
+    CREATE TABLE IF NOT EXISTS email_labels (
+      email_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      PRIMARY KEY (email_id, label)
+    )
+  `);
     logger_1.default.info('Database initialized');
 }
 exports.default = pool;
