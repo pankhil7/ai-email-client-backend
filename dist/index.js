@@ -42,6 +42,7 @@ const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const emails_routes_1 = __importDefault(require("./routes/emails.routes"));
 const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
+const logger_1 = __importDefault(require("./logger"));
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
 const allowedOrigins = [
@@ -50,18 +51,37 @@ const allowedOrigins = [
 ];
 app.use((0, cors_1.default)({
     origin: (origin, cb) => {
-        // allow requests with no origin (mobile apps, curl, etc.)
         if (!origin || allowedOrigins.includes(origin))
             return cb(null, true);
+        logger_1.default.warn('CORS blocked request', { origin });
         cb(new Error('Not allowed by CORS'));
     },
     credentials: true,
 }));
 app.use(express_1.default.json({ limit: '10mb' }));
+// HTTP request logger
+app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+        const duration = Date.now() - start;
+        const level = res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info';
+        logger_1.default[level](`${req.method} ${req.path}`, {
+            status: res.statusCode,
+            duration: `${duration}ms`,
+            ...(req.query.accountId && { accountId: req.query.accountId }),
+        });
+    });
+    next();
+});
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 app.use('/api/v1', auth_routes_1.default);
 app.use('/api/v1', emails_routes_1.default);
+// Global error handler
+app.use((err, _req, res, _next) => {
+    logger_1.default.error('Unhandled error', { message: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Internal server error' });
+});
 app.listen(PORT, () => {
-    console.log(`AI Email Backend running on http://localhost:${PORT}`);
+    logger_1.default.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
 });
 exports.default = app;

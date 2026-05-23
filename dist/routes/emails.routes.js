@@ -12,6 +12,7 @@ const auth_routes_1 = require("./auth.routes");
 const googleapis_1 = require("googleapis");
 const axios_1 = __importDefault(require("axios"));
 const db_1 = __importDefault(require("../db"));
+const logger_1 = __importDefault(require("../logger"));
 const router = (0, express_1.Router)();
 const gmailService = new gmail_service_1.GmailService();
 const imapService = new imap_service_1.ImapService();
@@ -20,7 +21,9 @@ const aiService = new ai_service_1.AIService();
 // In-memory cache loaded from SQLite on startup
 const accounts = new Map();
 // Load persisted accounts from DB into memory
-db_1.default.prepare('SELECT * FROM accounts').all().forEach((row) => {
+const _rows = db_1.default.prepare('SELECT * FROM accounts').all();
+logger_1.default.info('Loaded accounts from DB', { count: _rows.length });
+_rows.forEach((row) => {
     accounts.set(row.id, {
         id: row.id,
         email: row.email,
@@ -42,21 +45,24 @@ async function getFreshAccessToken(account) {
     const refreshToken = stored?.refreshToken || account.refreshToken || '';
     if (account.provider === 'gmail') {
         try {
+            logger_1.default.debug('Refreshing Gmail token', { accountId: account.id });
             const oauth2Client = new googleapis_1.google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REDIRECT_URI);
             oauth2Client.setCredentials({ refresh_token: refreshToken });
             const { credentials } = await oauth2Client.refreshAccessToken();
             const newToken = credentials.access_token || '';
-            // Update store and DB
+            logger_1.default.info('Gmail token refreshed', { accountId: account.id });
             auth_routes_1.tokenStore.set(account.id, { ...stored, accessToken: newToken });
             db_1.default.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
             return newToken;
         }
-        catch {
+        catch (err) {
+            logger_1.default.error('Gmail token refresh failed', { accountId: account.id, message: err.message });
             return stored?.accessToken || '';
         }
     }
     if (account.provider === 'office365') {
         try {
+            logger_1.default.debug('Refreshing Office365 token', { accountId: account.id });
             const res = await axios_1.default.post('https://login.microsoftonline.com/common/oauth2/v2.0/token', new URLSearchParams({
                 client_id: process.env.MICROSOFT_CLIENT_ID,
                 client_secret: process.env.MICROSOFT_CLIENT_SECRET,
@@ -64,11 +70,13 @@ async function getFreshAccessToken(account) {
                 grant_type: 'refresh_token',
             }), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
             const newToken = res.data.access_token || '';
+            logger_1.default.info('Office365 token refreshed', { accountId: account.id });
             auth_routes_1.tokenStore.set(account.id, { ...stored, accessToken: newToken });
             db_1.default.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
             return newToken;
         }
-        catch {
+        catch (err) {
+            logger_1.default.error('Office365 token refresh failed', { accountId: account.id, message: err.message });
             return stored?.accessToken || '';
         }
     }
@@ -94,6 +102,7 @@ async function fetchEmailsInBackground(account, allIds) {
     const accountId = account.id;
     const CHUNK_SIZE = 50;
     const total = allIds.length;
+    logger_1.default.info('Background fetch started', { accountId, total });
     loadingStatus.set(accountId, { loading: true, total, loaded: 0 });
     for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
         const chunk = allIds.slice(i, i + CHUNK_SIZE);
@@ -106,12 +115,13 @@ async function fetchEmailsInBackground(account, allIds) {
             const status = loadingStatus.get(accountId);
             loadingStatus.set(accountId, { ...status, loaded: status.loaded + emails.length });
         }
-        catch {
-            // skip failed chunk, continue
+        catch (err) {
+            logger_1.default.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message });
         }
     }
     const status = loadingStatus.get(accountId);
     loadingStatus.set(accountId, { ...status, loading: false });
+    logger_1.default.info('Background fetch complete', { accountId, loaded: status.loaded });
 }
 // POST /api/v1/accounts
 router.post('/accounts', (req, res) => {
@@ -225,6 +235,7 @@ router.get('/emails', async (req, res) => {
         res.json(allEmails);
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -286,6 +297,7 @@ router.get('/emails/search', async (req, res) => {
         res.json(emails);
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -308,6 +320,7 @@ router.post('/emails/send', async (req, res) => {
         res.json({ success: true });
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -331,6 +344,7 @@ router.post('/emails/:id/archive', async (req, res) => {
         res.json({ success: true });
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -354,6 +368,7 @@ router.post('/emails/:id/delete', async (req, res) => {
         res.json({ success: true });
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -376,6 +391,7 @@ router.post('/emails/:id/read', async (req, res) => {
         res.json({ success: true });
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });
@@ -423,6 +439,7 @@ router.post('/ai/prioritize', async (req, res) => {
         res.json({ score });
     }
     catch (err) {
+        logger_1.default.error(req.path + " failed", { message: err.message, stack: err.stack });
         res.status(500).json({ error: err.message });
     }
 });

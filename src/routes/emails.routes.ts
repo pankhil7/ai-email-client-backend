@@ -8,6 +8,7 @@ import { Email } from '../types/email.types';
 import { google } from 'googleapis';
 import axios from 'axios';
 import db from '../db';
+import logger from '../logger';
 
 const router = Router();
 const gmailService = new GmailService();
@@ -19,7 +20,9 @@ const aiService = new AIService();
 const accounts: Map<string, any> = new Map();
 
 // Load persisted accounts from DB into memory
-(db.prepare('SELECT * FROM accounts').all() as any[]).forEach((row) => {
+const _rows = db.prepare('SELECT * FROM accounts').all() as any[];
+logger.info('Loaded accounts from DB', { count: _rows.length });
+_rows.forEach((row) => {
   accounts.set(row.id, {
     id: row.id,
     email: row.email,
@@ -45,6 +48,7 @@ async function getFreshAccessToken(account: any): Promise<string> {
 
   if (account.provider === 'gmail') {
     try {
+      logger.debug('Refreshing Gmail token', { accountId: account.id });
       const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
@@ -53,18 +57,19 @@ async function getFreshAccessToken(account: any): Promise<string> {
       oauth2Client.setCredentials({ refresh_token: refreshToken });
       const { credentials } = await oauth2Client.refreshAccessToken();
       const newToken = credentials.access_token || '';
-
-      // Update store and DB
+      logger.info('Gmail token refreshed', { accountId: account.id });
       tokenStore.set(account.id, { ...stored!, accessToken: newToken });
       db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
       return newToken;
-    } catch {
+    } catch (err: any) {
+      logger.error('Gmail token refresh failed', { accountId: account.id, message: err.message });
       return stored?.accessToken || '';
     }
   }
 
   if (account.provider === 'office365') {
     try {
+      logger.debug('Refreshing Office365 token', { accountId: account.id });
       const res = await axios.post(
         'https://login.microsoftonline.com/common/oauth2/v2.0/token',
         new URLSearchParams({
@@ -76,10 +81,12 @@ async function getFreshAccessToken(account: any): Promise<string> {
         { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
       const newToken = res.data.access_token || '';
+      logger.info('Office365 token refreshed', { accountId: account.id });
       tokenStore.set(account.id, { ...stored!, accessToken: newToken });
       db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
       return newToken;
-    } catch {
+    } catch (err: any) {
+      logger.error('Office365 token refresh failed', { accountId: account.id, message: err.message });
       return stored?.accessToken || '';
     }
   }
@@ -110,6 +117,7 @@ async function fetchEmailsInBackground(account: any, allIds: string[]) {
   const CHUNK_SIZE = 50;
   const total = allIds.length;
 
+  logger.info('Background fetch started', { accountId, total });
   loadingStatus.set(accountId, { loading: true, total, loaded: 0 });
 
   for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
@@ -124,13 +132,14 @@ async function fetchEmailsInBackground(account: any, allIds: string[]) {
 
       const status = loadingStatus.get(accountId)!;
       loadingStatus.set(accountId, { ...status, loaded: status.loaded + emails.length });
-    } catch {
-      // skip failed chunk, continue
+    } catch (err: any) {
+      logger.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message });
     }
   }
 
   const status = loadingStatus.get(accountId)!;
   loadingStatus.set(accountId, { ...status, loading: false });
+  logger.info('Background fetch complete', { accountId, loaded: status.loaded });
 }
 
 // POST /api/v1/accounts
@@ -257,6 +266,7 @@ router.get('/emails', async (req: Request, res: Response) => {
     allEmails.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     res.json(allEmails);
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -332,6 +342,7 @@ router.get('/emails/search', async (req: Request, res: Response) => {
 
     res.json(emails);
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -352,6 +363,7 @@ router.post('/emails/send', async (req: Request, res: Response) => {
     }
     res.json({ success: true });
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -373,6 +385,7 @@ router.post('/emails/:id/archive', async (req: Request, res: Response) => {
     emailCache.set(accountId, (emailCache.get(accountId) || []).filter(e => e.id !== req.params.id));
     res.json({ success: true });
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -394,6 +407,7 @@ router.post('/emails/:id/delete', async (req: Request, res: Response) => {
     emailCache.set(accountId, (emailCache.get(accountId) || []).filter(e => e.id !== req.params.id));
     res.json({ success: true });
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -414,6 +428,7 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
     }
     res.json({ success: true });
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });
@@ -461,6 +476,7 @@ router.post('/ai/prioritize', async (req: Request, res: Response) => {
     const score = await aiService.prioritizeEmail(subject, body, from);
     res.json({ score });
   } catch (err: any) {
+    logger.error(req.path + " failed", { message: err.message, stack: err.stack });
     res.status(500).json({ error: err.message });
   }
 });

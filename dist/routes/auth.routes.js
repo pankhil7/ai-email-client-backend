@@ -8,6 +8,7 @@ const express_1 = require("express");
 const googleapis_1 = require("googleapis");
 const axios_1 = __importDefault(require("axios"));
 const db_1 = __importDefault(require("../db"));
+const logger_1 = __importDefault(require("../logger"));
 const router = (0, express_1.Router)();
 // In-memory token store — seeded from SQLite on startup
 exports.tokenStore = new Map();
@@ -48,6 +49,7 @@ router.get('/auth/google/callback', async (req, res) => {
         const { data } = await oauth2.userinfo.get();
         const email = data.email || '';
         const accountId = `gmail-${email}`;
+        logger_1.default.info('Gmail OAuth success', { accountId, email });
         exports.tokenStore.set(accountId, {
             accessToken: tokens.access_token || '',
             refreshToken: tokens.refresh_token || '',
@@ -67,6 +69,7 @@ router.get('/auth/google/callback', async (req, res) => {
         res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail`);
     }
     catch (err) {
+        logger_1.default.error('Gmail OAuth callback failed', { message: err.message });
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
         res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
     }
@@ -128,6 +131,7 @@ router.get('/auth/microsoft/callback', async (req, res) => {
         });
         const email = userRes.data.mail || userRes.data.userPrincipalName || '';
         const accountId = `office365-${email}`;
+        logger_1.default.info('Office365 OAuth success', { accountId, email });
         exports.tokenStore.set(accountId, { accessToken: access_token, refreshToken: refresh_token || '', email });
         db_1.default.prepare(`
       INSERT INTO tokens (account_id, access_token, refresh_token, email)
@@ -140,6 +144,7 @@ router.get('/auth/microsoft/callback', async (req, res) => {
         res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
     }
     catch (err) {
+        logger_1.default.error('Office365 OAuth callback failed', { message: err.message });
         res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
     }
 });

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 import axios from 'axios';
 import db from '../db';
+import logger from '../logger';
 
 const router = Router();
 
@@ -57,6 +58,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
     const email = data.email || '';
 
     const accountId = `gmail-${email}`;
+    logger.info('Gmail OAuth success', { accountId, email });
     tokenStore.set(accountId, {
       accessToken: tokens.access_token || '',
       refreshToken: tokens.refresh_token || '',
@@ -79,6 +81,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       `${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail`
     );
   } catch (err: any) {
+    logger.error('Gmail OAuth callback failed', { message: err.message });
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
   }
@@ -155,6 +158,7 @@ router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
     const email = userRes.data.mail || userRes.data.userPrincipalName || '';
 
     const accountId = `office365-${email}`;
+    logger.info('Office365 OAuth success', { accountId, email });
     tokenStore.set(accountId, { accessToken: access_token, refreshToken: refresh_token || '', email });
 
     db.prepare(`
@@ -168,6 +172,7 @@ router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
 
     res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
   } catch (err: any) {
+    logger.error('Office365 OAuth callback failed', { message: err.message });
     res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
   }
 });
