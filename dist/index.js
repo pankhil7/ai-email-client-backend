@@ -40,9 +40,11 @@ const dotenv = __importStar(require("dotenv"));
 dotenv.config();
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
+const cookie_parser_1 = __importDefault(require("cookie-parser"));
 const db_1 = require("./db");
 const emails_routes_1 = __importStar(require("./routes/emails.routes"));
 const auth_routes_1 = __importStar(require("./routes/auth.routes"));
+const auth_middleware_1 = require("./middleware/auth.middleware");
 const logger_1 = __importDefault(require("./logger"));
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
@@ -60,6 +62,7 @@ app.use((0, cors_1.default)({
     credentials: true,
 }));
 app.use(express_1.default.json({ limit: '10mb' }));
+app.use((0, cookie_parser_1.default)());
 // HTTP request logger
 app.use((req, res, next) => {
     const start = Date.now();
@@ -75,8 +78,10 @@ app.use((req, res, next) => {
     next();
 });
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+// Public routes — no auth needed
 app.use('/api/v1', auth_routes_1.default);
-app.use('/api/v1', emails_routes_1.default);
+// Protected routes — require valid JWT
+app.use('/api/v1', auth_middleware_1.authenticate, emails_routes_1.default);
 // Global error handler
 app.use((err, _req, res, _next) => {
     logger_1.default.error('Unhandled error', { message: err.message, stack: err.stack });

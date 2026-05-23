@@ -32,6 +32,13 @@ async function initDb() {
       email TEXT
     )
   `);
+    await pool.query(`
+    CREATE TABLE IF NOT EXISTS refresh_tokens (
+      token TEXT PRIMARY KEY,
+      created_at TIMESTAMP DEFAULT NOW(),
+      expires_at TIMESTAMP NOT NULL
+    )
+  `);
     logger_1.default.info('Database initialized');
 }
 exports.default = pool;

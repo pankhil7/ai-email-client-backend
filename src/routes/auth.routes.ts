@@ -1,8 +1,32 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 import axios from 'axios';
+import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import pool from '../db';
 import logger from '../logger';
+
+const ACCESS_TOKEN_TTL = '15m';
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+function issueAccessToken(): string {
+  return jwt.sign({ sub: 'authenticated' }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TOKEN_TTL });
+}
+
+async function issueRefreshToken(res: Response): Promise<void> {
+  const token = crypto.randomBytes(40).toString('hex');
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+  await pool.query(
+    'INSERT INTO refresh_tokens (token, expires_at) VALUES ($1, $2)',
+    [token, expiresAt]
+  );
+  res.cookie('refreshToken', token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: REFRESH_TOKEN_TTL_MS,
+  });
+}
 
 const router = Router();
 
@@ -80,10 +104,14 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       [accountId, tokens.access_token || '', tokens.refresh_token || '', email]
     );
 
-    // Redirect back to frontend with account info
+    // Issue JWT + refresh token
+    const accessToken = issueAccessToken();
+    await issueRefreshToken(res);
+
+    // Redirect back to frontend with account info + access token
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(
-      `${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail`
+      `${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail&token=${accessToken}`
     );
   } catch (err: any) {
     logger.error('Gmail OAuth callback failed', { message: err.message, stack: err.stack });
@@ -176,11 +204,45 @@ router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
       [accountId, access_token, refresh_token || '', email]
     );
 
-    res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
+    const accessToken = issueAccessToken();
+    await issueRefreshToken(res);
+
+    res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365&token=${accessToken}`);
   } catch (err: any) {
     logger.error('Office365 OAuth callback failed', { message: err.message, stack: err.stack });
     res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
   }
+});
+
+// POST /api/v1/auth/refresh — issue new access token using refresh token cookie
+router.post('/auth/refresh', async (req: Request, res: Response) => {
+  const refreshToken = req.cookies?.refreshToken;
+  if (!refreshToken) return res.status(401).json({ error: 'No refresh token' });
+
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM refresh_tokens WHERE token = $1 AND expires_at > NOW()',
+      [refreshToken]
+    );
+    if (rows.length === 0) return res.status(401).json({ error: 'Invalid or expired refresh token' });
+
+    const accessToken = issueAccessToken();
+    logger.info('Access token refreshed via refresh token');
+    res.json({ accessToken });
+  } catch (err: any) {
+    logger.error('Token refresh failed', { message: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Token refresh failed' });
+  }
+});
+
+// POST /api/v1/auth/logout — clear refresh token
+router.post('/auth/logout', async (req: Request, res: Response) => {
+  const refreshToken = req.cookies?.refreshToken;
+  if (refreshToken) {
+    await pool.query('DELETE FROM refresh_tokens WHERE token = $1', [refreshToken]);
+  }
+  res.clearCookie('refreshToken', { httpOnly: true, secure: true, sameSite: 'none' });
+  res.json({ success: true });
 });
 
 export default router;

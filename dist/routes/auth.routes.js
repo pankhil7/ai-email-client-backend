@@ -8,8 +8,26 @@ exports.initTokenStore = initTokenStore;
 const express_1 = require("express");
 const googleapis_1 = require("googleapis");
 const axios_1 = __importDefault(require("axios"));
+const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
+const crypto_1 = __importDefault(require("crypto"));
 const db_1 = __importDefault(require("../db"));
 const logger_1 = __importDefault(require("../logger"));
+const ACCESS_TOKEN_TTL = '15m';
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+function issueAccessToken() {
+    return jsonwebtoken_1.default.sign({ sub: 'authenticated' }, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+}
+async function issueRefreshToken(res) {
+    const token = crypto_1.default.randomBytes(40).toString('hex');
+    const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
+    await db_1.default.query('INSERT INTO refresh_tokens (token, expires_at) VALUES ($1, $2)', [token, expiresAt]);
+    res.cookie('refreshToken', token, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: REFRESH_TOKEN_TTL_MS,
+    });
+}
 const router = (0, express_1.Router)();
 // In-memory token store — seeded from PostgreSQL on startup
 exports.tokenStore = new Map();
@@ -67,9 +85,12 @@ router.get('/auth/google/callback', async (req, res) => {
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
          email = EXCLUDED.email`, [accountId, tokens.access_token || '', tokens.refresh_token || '', email]);
-        // Redirect back to frontend with account info
+        // Issue JWT + refresh token
+        const accessToken = issueAccessToken();
+        await issueRefreshToken(res);
+        // Redirect back to frontend with account info + access token
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-        res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail`);
+        res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail&token=${accessToken}`);
     }
     catch (err) {
         logger_1.default.error('Gmail OAuth callback failed', { message: err.message, stack: err.stack });
@@ -142,11 +163,40 @@ router.get('/auth/microsoft/callback', async (req, res) => {
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
          email = EXCLUDED.email`, [accountId, access_token, refresh_token || '', email]);
-        res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
+        const accessToken = issueAccessToken();
+        await issueRefreshToken(res);
+        res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365&token=${accessToken}`);
     }
     catch (err) {
         logger_1.default.error('Office365 OAuth callback failed', { message: err.message, stack: err.stack });
         res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
     }
+});
+// POST /api/v1/auth/refresh — issue new access token using refresh token cookie
+router.post('/auth/refresh', async (req, res) => {
+    const refreshToken = req.cookies?.refreshToken;
+    if (!refreshToken)
+        return res.status(401).json({ error: 'No refresh token' });
+    try {
+        const { rows } = await db_1.default.query('SELECT * FROM refresh_tokens WHERE token = $1 AND expires_at > NOW()', [refreshToken]);
+        if (rows.length === 0)
+            return res.status(401).json({ error: 'Invalid or expired refresh token' });
+        const accessToken = issueAccessToken();
+        logger_1.default.info('Access token refreshed via refresh token');
+        res.json({ accessToken });
+    }
+    catch (err) {
+        logger_1.default.error('Token refresh failed', { message: err.message, stack: err.stack });
+        res.status(500).json({ error: 'Token refresh failed' });
+    }
+});
+// POST /api/v1/auth/logout — clear refresh token
+router.post('/auth/logout', async (req, res) => {
+    const refreshToken = req.cookies?.refreshToken;
+    if (refreshToken) {
+        await db_1.default.query('DELETE FROM refresh_tokens WHERE token = $1', [refreshToken]);
+    }
+    res.clearCookie('refreshToken', { httpOnly: true, secure: true, sameSite: 'none' });
+    res.json({ success: true });
 });
 exports.default = router;

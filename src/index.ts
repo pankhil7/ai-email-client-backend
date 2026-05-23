@@ -3,9 +3,11 @@ dotenv.config();
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import { initDb } from './db';
 import emailsRouter, { initAccounts } from './routes/emails.routes';
 import authRouter, { initTokenStore } from './routes/auth.routes';
+import { authenticate } from './middleware/auth.middleware';
 import logger from './logger';
 
 const app = express();
@@ -26,6 +28,7 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '10mb' }));
+app.use(cookieParser());
 
 // HTTP request logger
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -44,8 +47,11 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
+// Public routes — no auth needed
 app.use('/api/v1', authRouter);
-app.use('/api/v1', emailsRouter);
+
+// Protected routes — require valid JWT
+app.use('/api/v1', authenticate, emailsRouter);
 
 // Global error handler
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
