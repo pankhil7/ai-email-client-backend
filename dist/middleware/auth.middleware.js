@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authenticate = authenticate;
+exports.authenticate = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const logger_1 = __importDefault(require("../logger"));
 function authenticate(req, res, next) {
@@ -14,7 +14,8 @@ function authenticate(req, res, next) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     try {
-        jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET);
+        const payload = jsonwebtoken_1.default.verify(token, process.env.JWT_SECRET);
+        req.userId = payload.sub;
         next();
     }
     catch (err) {
@@ -22,3 +23,4 @@ function authenticate(req, res, next) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 }
+exports.authenticate = authenticate;

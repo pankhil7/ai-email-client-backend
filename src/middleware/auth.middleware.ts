@@ -12,7 +12,8 @@ export function authenticate(req: Request, res: Response, next: NextFunction) {
   }
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET!);
+    const payload = jwt.verify(token, process.env.JWT_SECRET!) as { sub: string };
+    req.userId = payload.sub;
     next();
   } catch (err: any) {
     logger.warn('Request rejected — invalid token', { path: req.path, error: err.message });

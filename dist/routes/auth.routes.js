@@ -3,8 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.tokenStore = void 0;
-exports.initTokenStore = initTokenStore;
+exports.initTokenStore = exports.tokenStore = void 0;
 const express_1 = require("express");
 const googleapis_1 = require("googleapis");
 const axios_1 = __importDefault(require("axios"));
@@ -14,13 +13,13 @@ const db_1 = __importDefault(require("../db"));
 const logger_1 = __importDefault(require("../logger"));
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-function issueAccessToken() {
-    return jsonwebtoken_1.default.sign({ sub: 'authenticated' }, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+function issueAccessToken(userId) {
+    return jsonwebtoken_1.default.sign({ sub: userId }, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
 }
-async function issueRefreshToken(res) {
+async function issueRefreshToken(res, userId) {
     const token = crypto_1.default.randomBytes(40).toString('hex');
     const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
-    await db_1.default.query('INSERT INTO refresh_tokens (token, expires_at) VALUES ($1, $2)', [token, expiresAt]);
+    await db_1.default.query('INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)', [token, userId, expiresAt]);
     res.cookie('refreshToken', token, {
         httpOnly: true,
         secure: true,
@@ -42,6 +41,7 @@ async function initTokenStore() {
     });
     logger_1.default.info('Token store seeded from DB', { count: rows.length });
 }
+exports.initTokenStore = initTokenStore;
 function getOAuthClient() {
     return new googleapis_1.google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, process.env.GOOGLE_REDIRECT_URI || 'http://localhost:4000/api/v1/auth/google/callback');
 }
@@ -85,9 +85,9 @@ router.get('/auth/google/callback', async (req, res) => {
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
          email = EXCLUDED.email`, [accountId, tokens.access_token || '', tokens.refresh_token || '', email]);
-        // Issue JWT + refresh token
-        const accessToken = issueAccessToken();
-        await issueRefreshToken(res);
+        // Issue JWT + refresh token (userId = Google account email)
+        const accessToken = issueAccessToken(email);
+        await issueRefreshToken(res, email);
         // Redirect back to frontend with account info + access token
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
         res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail&token=${accessToken}`);
@@ -163,8 +163,9 @@ router.get('/auth/microsoft/callback', async (req, res) => {
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
          email = EXCLUDED.email`, [accountId, access_token, refresh_token || '', email]);
-        const accessToken = issueAccessToken();
-        await issueRefreshToken(res);
+        // Issue JWT + refresh token (userId = Microsoft account email)
+        const accessToken = issueAccessToken(email);
+        await issueRefreshToken(res, email);
         res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365&token=${accessToken}`);
     }
     catch (err) {
@@ -181,8 +182,9 @@ router.post('/auth/refresh', async (req, res) => {
         const { rows } = await db_1.default.query('SELECT * FROM refresh_tokens WHERE token = $1 AND expires_at > NOW()', [refreshToken]);
         if (rows.length === 0)
             return res.status(401).json({ error: 'Invalid or expired refresh token' });
-        const accessToken = issueAccessToken();
-        logger_1.default.info('Access token refreshed via refresh token');
+        const userId = rows[0].user_id;
+        const accessToken = issueAccessToken(userId);
+        logger_1.default.info('Access token refreshed via refresh token', { userId });
         res.json({ accessToken });
     }
     catch (err) {

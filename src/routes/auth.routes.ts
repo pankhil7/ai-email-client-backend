@@ -9,16 +9,16 @@ import logger from '../logger';
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-function issueAccessToken(): string {
-  return jwt.sign({ sub: 'authenticated' }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TOKEN_TTL });
+function issueAccessToken(userId: string): string {
+  return jwt.sign({ sub: userId }, process.env.JWT_SECRET!, { expiresIn: ACCESS_TOKEN_TTL });
 }
 
-async function issueRefreshToken(res: Response): Promise<void> {
+async function issueRefreshToken(res: Response, userId: string): Promise<void> {
   const token = crypto.randomBytes(40).toString('hex');
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
   await pool.query(
-    'INSERT INTO refresh_tokens (token, expires_at) VALUES ($1, $2)',
-    [token, expiresAt]
+    'INSERT INTO refresh_tokens (token, user_id, expires_at) VALUES ($1, $2, $3)',
+    [token, userId, expiresAt]
   );
   res.cookie('refreshToken', token, {
     httpOnly: true,
@@ -104,9 +104,9 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       [accountId, tokens.access_token || '', tokens.refresh_token || '', email]
     );
 
-    // Issue JWT + refresh token
-    const accessToken = issueAccessToken();
-    await issueRefreshToken(res);
+    // Issue JWT + refresh token (userId = Google account email)
+    const accessToken = issueAccessToken(email);
+    await issueRefreshToken(res, email);
 
     // Redirect back to frontend with account info + access token
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -204,8 +204,9 @@ router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
       [accountId, access_token, refresh_token || '', email]
     );
 
-    const accessToken = issueAccessToken();
-    await issueRefreshToken(res);
+    // Issue JWT + refresh token (userId = Microsoft account email)
+    const accessToken = issueAccessToken(email);
+    await issueRefreshToken(res, email);
 
     res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365&token=${accessToken}`);
   } catch (err: any) {
@@ -226,8 +227,9 @@ router.post('/auth/refresh', async (req: Request, res: Response) => {
     );
     if (rows.length === 0) return res.status(401).json({ error: 'Invalid or expired refresh token' });
 
-    const accessToken = issueAccessToken();
-    logger.info('Access token refreshed via refresh token');
+    const userId = rows[0].user_id;
+    const accessToken = issueAccessToken(userId);
+    logger.info('Access token refreshed via refresh token', { userId });
     res.json({ accessToken });
   } catch (err: any) {
     logger.error('Token refresh failed', { message: err.message, stack: err.stack });

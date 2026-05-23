@@ -32,6 +32,7 @@ export async function initAccounts(): Promise<void> {
       imapPort: row.imap_port,
       imapPassword: row.imap_password,
       color: row.color,
+      userId: row.user_id,
     });
   });
   logger.info('Loaded accounts from DB', { count: rows.length });
@@ -145,20 +146,22 @@ async function fetchEmailsInBackground(account: any, allIds: string[]) {
 
 // POST /api/v1/accounts
 router.post('/accounts', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color } = req.body;
-  const account = { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color };
+  const account = { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color, userId };
   accounts.set(id, account);
 
-  // Persist to PostgreSQL
+  // Persist to PostgreSQL with user_id
   await db.query(
-    `INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color, user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
      ON CONFLICT (id) DO UPDATE SET
        email = EXCLUDED.email, provider = EXCLUDED.provider,
        access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
        imap_host = EXCLUDED.imap_host, imap_port = EXCLUDED.imap_port,
-       imap_password = EXCLUDED.imap_password, color = EXCLUDED.color`,
-    [id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null]
+       imap_password = EXCLUDED.imap_password, color = EXCLUDED.color,
+       user_id = EXCLUDED.user_id`,
+    [id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null, userId]
   );
 
   // Clear old cache when account is re-added
@@ -169,29 +172,39 @@ router.post('/accounts', async (req: Request, res: Response) => {
 });
 
 // GET /api/v1/accounts
-router.get('/accounts', (_req: Request, res: Response) => {
-  res.json(Array.from(accounts.values()).map(({ imapPassword, accessToken, ...safe }) => safe));
+router.get('/accounts', (req: Request, res: Response) => {
+  const userId = req.userId!;
+  const userAccounts = Array.from(accounts.values()).filter((a: any) => a.userId === userId);
+  res.json(userAccounts.map(({ imapPassword, accessToken, userId: _uid, ...safe }) => safe));
 });
 
 // DELETE /api/v1/accounts/:id
 router.delete('/accounts/:id', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const id = req.params.id as string;
+  const account = accounts.get(id);
+  // Only allow deleting own accounts
+  if (!account || account.userId !== userId) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   accounts.delete(id);
   emailCache.delete(id);
   loadingStatus.delete(id);
-  await db.query('DELETE FROM accounts WHERE id = $1', [id]);
+  await db.query('DELETE FROM accounts WHERE id = $1 AND user_id = $2', [id, userId]);
   await db.query('DELETE FROM tokens WHERE account_id = $1', [id]);
   res.json({ success: true });
 });
 
 // GET /api/v1/emails — returns first 50 immediately, kicks off background jobs
 router.get('/emails', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const accountId = req.query.accountId as string | undefined;
 
   try {
+    const userAccounts = Array.from(accounts.values()).filter((a: any) => a.userId === userId);
     const targetAccounts = accountId
-      ? [accounts.get(accountId)].filter(Boolean)
-      : Array.from(accounts.values());
+      ? userAccounts.filter((a: any) => a.id === accountId)
+      : userAccounts;
 
     const allEmailsPromises = targetAccounts.map(async (account) => {
       if (account.provider === 'gmail') {
@@ -275,12 +288,14 @@ router.get('/emails', async (req: Request, res: Response) => {
 
 // GET /api/v1/emails/more — returns cached emails after offset (for polling)
 router.get('/emails/more', (req: Request, res: Response) => {
+  const userId = req.userId!;
   const accountId = req.query.accountId as string | undefined;
   const offset = parseInt(req.query.offset as string) || 50;
 
+  const userAccounts = Array.from(accounts.values()).filter((a: any) => a.userId === userId);
   const targetAccounts = accountId
-    ? [accounts.get(accountId)].filter(Boolean)
-    : Array.from(accounts.values());
+    ? userAccounts.filter((a: any) => a.id === accountId)
+    : userAccounts;
 
   const allEmails: Email[] = [];
   const status: any = {};
@@ -300,11 +315,13 @@ router.get('/emails/more', (req: Request, res: Response) => {
 
 // GET /api/v1/emails/status — check background loading progress
 router.get('/emails/status', (req: Request, res: Response) => {
+  const userId = req.userId!;
   const accountId = req.query.accountId as string | undefined;
 
+  const userAccounts = Array.from(accounts.values()).filter((a: any) => a.userId === userId);
   const targetAccounts = accountId
-    ? [accounts.get(accountId)].filter(Boolean)
-    : Array.from(accounts.values());
+    ? userAccounts.filter((a: any) => a.id === accountId)
+    : userAccounts;
 
   const status: any = {};
   for (const account of targetAccounts) {
@@ -318,13 +335,15 @@ router.get('/emails/status', (req: Request, res: Response) => {
 
 // GET /api/v1/emails/search
 router.get('/emails/search', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const query = req.query.query as string;
   const accountId = req.query.accountId as string | undefined;
 
   try {
+    const userAccounts = Array.from(accounts.values()).filter((a: any) => a.userId === userId);
     const targetAccounts = accountId
-      ? [accounts.get(accountId)].filter(Boolean)
-      : Array.from(accounts.values());
+      ? userAccounts.filter((a: any) => a.id === accountId)
+      : userAccounts;
 
     const results = await Promise.allSettled(
       targetAccounts.map(async (account) => {
@@ -435,10 +454,14 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
   }
 });
 
-// GET /api/v1/emails/labels — fetch all saved labels
+// GET /api/v1/emails/labels — fetch all saved labels for this user
 router.get('/emails/labels', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   try {
-    const { rows } = await db.query('SELECT email_id, label FROM email_labels');
+    const { rows } = await db.query(
+      'SELECT email_id, label FROM email_labels WHERE user_id = $1',
+      [userId]
+    );
     res.json(rows);
   } catch (err: any) {
     logger.error('/emails/labels GET failed', { message: err.message, stack: err.stack });
@@ -448,12 +471,13 @@ router.get('/emails/labels', async (req: Request, res: Response) => {
 
 // POST /api/v1/emails/:id/labels — save a label for an email
 router.post('/emails/:id/labels', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const { label } = req.body;
   const emailId = req.params.id as string;
   try {
     await db.query(
-      'INSERT INTO email_labels (email_id, label) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-      [emailId, label]
+      'INSERT INTO email_labels (email_id, label, user_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+      [emailId, label, userId]
     );
     res.json({ success: true });
   } catch (err: any) {
@@ -464,10 +488,14 @@ router.post('/emails/:id/labels', async (req: Request, res: Response) => {
 
 // DELETE /api/v1/emails/:id/labels/:label — remove a label from an email
 router.delete('/emails/:id/labels/:label', async (req: Request, res: Response) => {
+  const userId = req.userId!;
   const emailId = req.params.id as string;
   const label = req.params.label as string;
   try {
-    await db.query('DELETE FROM email_labels WHERE email_id = $1 AND label = $2', [emailId, label]);
+    await db.query(
+      'DELETE FROM email_labels WHERE email_id = $1 AND label = $2 AND user_id = $3',
+      [emailId, label, userId]
+    );
     res.json({ success: true });
   } catch (err: any) {
     logger.error('/emails/:id/labels DELETE failed', { message: err.message, stack: err.stack });

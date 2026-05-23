@@ -72,7 +72,7 @@ export class Office365Service {
     let url: string | null = `/me/mailFolders/inbox/messages?$select=id&$top=100&$orderby=receivedDateTime desc&$skip=${skipFirst}`;
 
     while (url) {
-      const data = await this.get(accessToken, url.startsWith('https') ? '' : url);
+      const data: any = await this.get(accessToken, url.startsWith('https') ? '' : url);
       const msgs = data.value || [];
       allIds.push(...msgs.map((m: any) => m.id as string));
       url = data['@odata.nextLink'] || null;

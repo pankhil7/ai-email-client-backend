@@ -42,9 +42,18 @@ export async function initDb(): Promise<void> {
     CREATE TABLE IF NOT EXISTS email_labels (
       email_id TEXT NOT NULL,
       label TEXT NOT NULL,
+      user_id TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (email_id, label)
     )
   `);
+
+  // Migrations: add user_id columns if they don't exist yet
+  await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE email_labels ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+
+  // Back-fill accounts.user_id from email column (OAuth account owner = their email)
+  await pool.query(`UPDATE accounts SET user_id = email WHERE user_id = ''`);
 
   logger.info('Database initialized');
 }

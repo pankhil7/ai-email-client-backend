@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.initDb = initDb;
+exports.initDb = void 0;
 const pg_1 = require("pg");
 const logger_1 = __importDefault(require("./logger"));
 const pool = new pg_1.Pool({
@@ -43,9 +43,17 @@ async function initDb() {
     CREATE TABLE IF NOT EXISTS email_labels (
       email_id TEXT NOT NULL,
       label TEXT NOT NULL,
+      user_id TEXT NOT NULL DEFAULT '',
       PRIMARY KEY (email_id, label)
     )
   `);
+    // Migrations: add user_id columns if they don't exist yet
+    await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+    await pool.query(`ALTER TABLE email_labels ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+    await pool.query(`ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''`);
+    // Back-fill accounts.user_id from email column (OAuth account owner = their email)
+    await pool.query(`UPDATE accounts SET user_id = email WHERE user_id = ''`);
     logger_1.default.info('Database initialized');
 }
+exports.initDb = initDb;
 exports.default = pool;
