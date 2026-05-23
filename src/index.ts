@@ -59,7 +59,12 @@ async function main() {
     await initTokenStore();
     await initAccounts();
     app.listen(PORT, () => {
-      logger.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+      logger.info(`AI Email Backend running`, {
+        port: PORT,
+        env: process.env.NODE_ENV || 'development',
+        frontendUrl: process.env.FRONTEND_URL || 'NOT SET',
+        databaseUrl: process.env.DATABASE_URL ? 'SET' : 'NOT SET',
+      });
     });
   } catch (err: any) {
     logger.error('Failed to start server', { message: err.message, stack: err.stack });

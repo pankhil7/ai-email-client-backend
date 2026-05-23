@@ -88,7 +88,12 @@ async function main() {
         await (0, auth_routes_1.initTokenStore)();
         await (0, emails_routes_1.initAccounts)();
         app.listen(PORT, () => {
-            logger_1.default.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+            logger_1.default.info(`AI Email Backend running`, {
+                port: PORT,
+                env: process.env.NODE_ENV || 'development',
+                frontendUrl: process.env.FRONTEND_URL || 'NOT SET',
+                databaseUrl: process.env.DATABASE_URL ? 'SET' : 'NOT SET',
+            });
         });
     }
     catch (err) {
