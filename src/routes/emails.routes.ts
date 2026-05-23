@@ -1,48 +1,181 @@
 import { Router, Request, Response } from 'express';
 import { GmailService } from '../services/gmail.service';
 import { ImapService } from '../services/imap.service';
+import { Office365Service } from '../services/office365.service';
 import { AIService } from '../services/ai.service';
 import { tokenStore } from './auth.routes';
+import { Email } from '../types/email.types';
+import { google } from 'googleapis';
+import axios from 'axios';
+import db from '../db';
 
 const router = Router();
 const gmailService = new GmailService();
 const imapService = new ImapService();
+const office365Service = new Office365Service();
 const aiService = new AIService();
 
-// In-memory account store (in production, use a database)
+// In-memory cache loaded from SQLite on startup
 const accounts: Map<string, any> = new Map();
 
-// Helper: get access token for gmail account
-function getAccessToken(account: any): string {
+// Load persisted accounts from DB into memory
+(db.prepare('SELECT * FROM accounts').all() as any[]).forEach((row) => {
+  accounts.set(row.id, {
+    id: row.id,
+    email: row.email,
+    provider: row.provider,
+    accessToken: row.access_token,
+    refreshToken: row.refresh_token,
+    imapHost: row.imap_host,
+    imapPort: row.imap_port,
+    imapPassword: row.imap_password,
+    color: row.color,
+  });
+});
+
+// Email cache: accountId -> Email[]
+const emailCache: Map<string, Email[]> = new Map();
+
+// Loading status per account: accountId -> { loading, total, loaded }
+const loadingStatus: Map<string, { loading: boolean; total: number; loaded: number }> = new Map();
+
+async function getFreshAccessToken(account: any): Promise<string> {
+  const stored = tokenStore.get(account.id);
+  const refreshToken = stored?.refreshToken || account.refreshToken || '';
+
   if (account.provider === 'gmail') {
+    try {
+      const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
+      );
+      oauth2Client.setCredentials({ refresh_token: refreshToken });
+      const { credentials } = await oauth2Client.refreshAccessToken();
+      const newToken = credentials.access_token || '';
+
+      // Update store and DB
+      tokenStore.set(account.id, { ...stored!, accessToken: newToken });
+      db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+      return newToken;
+    } catch {
+      return stored?.accessToken || '';
+    }
+  }
+
+  if (account.provider === 'office365') {
+    try {
+      const res = await axios.post(
+        'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+        new URLSearchParams({
+          client_id: process.env.MICROSOFT_CLIENT_ID!,
+          client_secret: process.env.MICROSOFT_CLIENT_SECRET!,
+          refresh_token: refreshToken,
+          grant_type: 'refresh_token',
+        }),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+      const newToken = res.data.access_token || '';
+      tokenStore.set(account.id, { ...stored!, accessToken: newToken });
+      db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+      return newToken;
+    } catch {
+      return stored?.accessToken || '';
+    }
+  }
+
+  return stored?.accessToken || account.accessToken || '';
+}
+
+function getAccessToken(account: any): string {
+  if (account.provider === 'gmail' || account.provider === 'office365') {
     const stored = tokenStore.get(account.id);
     return stored?.accessToken || account.accessToken || '';
   }
   return account.accessToken || '';
 }
 
-// POST /api/v1/accounts — register an account
+function getImapConfig(account: any) {
+  return {
+    host: account.imapHost,
+    port: account.imapPort,
+    email: account.email,
+    password: account.imapPassword,
+  };
+}
+
+// Background job: fetch emails in chunks of 50 and push to cache
+async function fetchEmailsInBackground(account: any, allIds: string[]) {
+  const accountId = account.id;
+  const CHUNK_SIZE = 50;
+  const total = allIds.length;
+
+  loadingStatus.set(accountId, { loading: true, total, loaded: 0 });
+
+  for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
+    const chunk = allIds.slice(i, i + CHUNK_SIZE);
+
+    try {
+      const emails = await gmailService.fetchEmailsByIds(await getFreshAccessToken(account), accountId, chunk);
+      const existing = emailCache.get(accountId) || [];
+      const existingIds = new Set(existing.map((e) => e.id));
+      const unique = emails.filter((e) => !existingIds.has(e.id));
+      emailCache.set(accountId, [...existing, ...unique]);
+
+      const status = loadingStatus.get(accountId)!;
+      loadingStatus.set(accountId, { ...status, loaded: status.loaded + emails.length });
+    } catch {
+      // skip failed chunk, continue
+    }
+  }
+
+  const status = loadingStatus.get(accountId)!;
+  loadingStatus.set(accountId, { ...status, loading: false });
+}
+
+// POST /api/v1/accounts
 router.post('/accounts', (req: Request, res: Response) => {
   const { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color } = req.body;
-  accounts.set(id, { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color });
+  const account = { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color };
+  accounts.set(id, account);
+
+  // Persist to SQLite
+  db.prepare(`
+    INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      email=excluded.email, provider=excluded.provider,
+      access_token=excluded.access_token, refresh_token=excluded.refresh_token,
+      imap_host=excluded.imap_host, imap_port=excluded.imap_port,
+      imap_password=excluded.imap_password, color=excluded.color
+  `).run(id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null);
+
+  // Clear old cache when account is re-added
+  emailCache.delete(id);
+  loadingStatus.delete(id);
+
   res.json({ success: true, accountId: id });
 });
 
-// GET /api/v1/accounts — list accounts
+// GET /api/v1/accounts
 router.get('/accounts', (_req: Request, res: Response) => {
   res.json(Array.from(accounts.values()).map(({ imapPassword, accessToken, ...safe }) => safe));
 });
 
 // DELETE /api/v1/accounts/:id
 router.delete('/accounts/:id', (req: Request, res: Response) => {
-  accounts.delete(req.params.id as string);
+  const id = req.params.id as string;
+  accounts.delete(id);
+  emailCache.delete(id);
+  loadingStatus.delete(id);
+  db.prepare('DELETE FROM accounts WHERE id = ?').run(id);
+  db.prepare('DELETE FROM tokens WHERE account_id = ?').run(id);
   res.json({ success: true });
 });
 
-// GET /api/v1/emails — fetch unified inbox
+// GET /api/v1/emails — returns first 50 immediately, kicks off background jobs
 router.get('/emails', async (req: Request, res: Response) => {
   const accountId = req.query.accountId as string | undefined;
-  const maxResults = parseInt(req.query.maxResults as string) || 0; // 0 = fetch all
 
   try {
     const targetAccounts = accountId
@@ -51,13 +184,68 @@ router.get('/emails', async (req: Request, res: Response) => {
 
     const allEmailsPromises = targetAccounts.map(async (account) => {
       if (account.provider === 'gmail') {
-        return gmailService.fetchEmails(getAccessToken(account), account.id, maxResults);
+        const accessToken = await getFreshAccessToken(account);
+
+        // Fast: one API call to get first 50 IDs
+        const first50Ids = await gmailService.fetchFirstIds(accessToken, 50);
+        const first50 = await gmailService.fetchEmailsByIds(accessToken, account.id, first50Ids);
+
+        // Cache the first 50
+        emailCache.set(account.id, first50);
+        loadingStatus.set(account.id, { loading: true, total: first50.length, loaded: first50.length });
+
+        // Background: fetch all remaining IDs and emails (skipping the first 50)
+        (async () => {
+          try {
+            const remainingIds = await gmailService.fetchAllIds(accessToken, 50);
+            if (remainingIds.length > 0) {
+              const total = first50.length + remainingIds.length;
+              loadingStatus.set(account.id, { loading: true, total, loaded: first50.length });
+              await fetchEmailsInBackground(account, remainingIds);
+            } else {
+              loadingStatus.set(account.id, { loading: false, total: first50.length, loaded: first50.length });
+            }
+          } catch {}
+        })();
+
+        return first50;
+      } else if (account.provider === 'office365') {
+        const accessToken = await getFreshAccessToken(account);
+
+        const first50Ids = await office365Service.fetchFirstIds(accessToken, 50);
+        const first50 = await office365Service.fetchEmailsByIds(accessToken, account.id, first50Ids);
+
+        emailCache.set(account.id, first50);
+        loadingStatus.set(account.id, { loading: true, total: first50.length, loaded: first50.length });
+
+        (async () => {
+          try {
+            const remainingIds = await office365Service.fetchAllIds(accessToken, 50);
+            if (remainingIds.length > 0) {
+              const total = first50.length + remainingIds.length;
+              loadingStatus.set(account.id, { loading: true, total, loaded: first50.length });
+              // fetch in chunks of 50
+              const CHUNK_SIZE = 50;
+              for (let i = 0; i < remainingIds.length; i += CHUNK_SIZE) {
+                const chunk = remainingIds.slice(i, i + CHUNK_SIZE);
+                const emails = await office365Service.fetchEmailsByIds(accessToken, account.id, chunk);
+                const existing = emailCache.get(account.id) || [];
+                const existingIds = new Set(existing.map((e) => e.id));
+                const unique = emails.filter((e) => !existingIds.has(e.id));
+                emailCache.set(account.id, [...existing, ...unique]);
+                const s = loadingStatus.get(account.id)!;
+                loadingStatus.set(account.id, { ...s, loaded: s.loaded + emails.length });
+              }
+            }
+            const s = loadingStatus.get(account.id)!;
+            loadingStatus.set(account.id, { ...s, loading: false });
+          } catch {}
+        })();
+
+        return first50;
       } else {
-        return imapService.fetchEmails(
-          { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
-          account.id,
-          maxResults
-        );
+        // IMAP (Yahoo, AOL, custom)
+        return imapService.fetchEmails(getImapConfig(account), account.id, 50);
       }
     });
 
@@ -67,11 +255,53 @@ router.get('/emails', async (req: Request, res: Response) => {
       .flatMap((r) => (r as PromiseFulfilledResult<any[]>).value);
 
     allEmails.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
     res.json(allEmails);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/v1/emails/more — returns cached emails after offset (for polling)
+router.get('/emails/more', (req: Request, res: Response) => {
+  const accountId = req.query.accountId as string | undefined;
+  const offset = parseInt(req.query.offset as string) || 50;
+
+  const targetAccounts = accountId
+    ? [accounts.get(accountId)].filter(Boolean)
+    : Array.from(accounts.values());
+
+  const allEmails: Email[] = [];
+  const status: any = {};
+
+  for (const account of targetAccounts) {
+    const cached = emailCache.get(account.id) || [];
+    const newEmails = cached.slice(offset);
+    allEmails.push(...newEmails);
+
+    const s = loadingStatus.get(account.id);
+    status[account.id] = s || { loading: false, total: cached.length, loaded: cached.length };
+  }
+
+  allEmails.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  res.json({ emails: allEmails, status });
+});
+
+// GET /api/v1/emails/status — check background loading progress
+router.get('/emails/status', (req: Request, res: Response) => {
+  const accountId = req.query.accountId as string | undefined;
+
+  const targetAccounts = accountId
+    ? [accounts.get(accountId)].filter(Boolean)
+    : Array.from(accounts.values());
+
+  const status: any = {};
+  for (const account of targetAccounts) {
+    const s = loadingStatus.get(account.id);
+    const cached = emailCache.get(account.id) || [];
+    status[account.id] = s || { loading: false, total: cached.length, loaded: cached.length };
+  }
+
+  res.json(status);
 });
 
 // GET /api/v1/emails/search
@@ -87,13 +317,11 @@ router.get('/emails/search', async (req: Request, res: Response) => {
     const results = await Promise.allSettled(
       targetAccounts.map(async (account) => {
         if (account.provider === 'gmail') {
-          return gmailService.searchEmails(getAccessToken(account), account.id, query);
+          return gmailService.searchEmails(await getFreshAccessToken(account), account.id, query);
+        } else if (account.provider === 'office365') {
+          return office365Service.searchEmails(await getFreshAccessToken(account), account.id, query);
         } else {
-          return imapService.searchEmails(
-            { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
-            account.id,
-            query
-          );
+          return imapService.searchEmails(getImapConfig(account), account.id, query);
         }
       })
     );
@@ -116,12 +344,11 @@ router.post('/emails/send', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.sendEmail(getAccessToken(account), payload);
+      await gmailService.sendEmail(await getFreshAccessToken(account), payload);
+    } else if (account.provider === 'office365') {
+      await office365Service.sendEmail(await getFreshAccessToken(account), payload);
     } else {
-      await imapService.sendEmail(
-        { host: account.imapHost, port: account.imapPort, email: account.email, password: account.imapPassword },
-        payload
-      );
+      await imapService.sendEmail(getImapConfig(account), payload);
     }
     res.json({ success: true });
   } catch (err: any) {
@@ -137,8 +364,13 @@ router.post('/emails/:id/archive', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.archiveEmail(getAccessToken(account), req.params.id as string);
+      await gmailService.archiveEmail(await getFreshAccessToken(account), req.params.id as string);
+    } else if (account.provider === 'office365') {
+      await office365Service.archiveEmail(await getFreshAccessToken(account), req.params.id as string);
+    } else {
+      await imapService.archiveEmail(getImapConfig(account), req.params.id as string);
     }
+    emailCache.set(accountId, (emailCache.get(accountId) || []).filter(e => e.id !== req.params.id));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -153,8 +385,13 @@ router.post('/emails/:id/delete', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.deleteEmail(getAccessToken(account), req.params.id as string);
+      await gmailService.deleteEmail(await getFreshAccessToken(account), req.params.id as string);
+    } else if (account.provider === 'office365') {
+      await office365Service.deleteEmail(await getFreshAccessToken(account), req.params.id as string);
+    } else {
+      await imapService.deleteEmail(getImapConfig(account), req.params.id as string);
     }
+    emailCache.set(accountId, (emailCache.get(accountId) || []).filter(e => e.id !== req.params.id));
     res.json({ success: true });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -169,7 +406,11 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
 
   try {
     if (account.provider === 'gmail') {
-      await gmailService.markAsRead(getAccessToken(account), req.params.id as string);
+      await gmailService.markAsRead(await getFreshAccessToken(account), req.params.id as string);
+    } else if (account.provider === 'office365') {
+      await office365Service.markAsRead(await getFreshAccessToken(account), req.params.id as string);
+    } else {
+      await imapService.markAsRead(getImapConfig(account), req.params.id as string);
     }
     res.json({ success: true });
   } catch (err: any) {
@@ -177,14 +418,12 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/v1/ai/summarize — streaming
+// POST /api/v1/ai/summarize
 router.post('/ai/summarize', async (req: Request, res: Response) => {
   const { subject, body } = req.body;
-
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-
   try {
     for await (const chunk of aiService.summarizeEmailStream(subject, body)) {
       res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);
@@ -197,14 +436,12 @@ router.post('/ai/summarize', async (req: Request, res: Response) => {
   }
 });
 
-// POST /api/v1/ai/draft-reply — streaming
+// POST /api/v1/ai/draft-reply
 router.post('/ai/draft-reply', async (req: Request, res: Response) => {
   const { subject, body, fromName } = req.body;
-
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
-
   try {
     for await (const chunk of aiService.draftReplyStream(subject, body, fromName)) {
       res.write(`data: ${JSON.stringify({ text: chunk })}\n\n`);

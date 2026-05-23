@@ -1,10 +1,20 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
+import axios from 'axios';
+import db from '../db';
 
 const router = Router();
 
-// In-memory token store (keyed by accountId)
+// In-memory token store — seeded from SQLite on startup
 export const tokenStore: Map<string, { accessToken: string; refreshToken: string; email: string }> = new Map();
+
+(db.prepare('SELECT * FROM tokens').all() as any[]).forEach((row) => {
+  tokenStore.set(row.account_id, {
+    accessToken: row.access_token,
+    refreshToken: row.refresh_token || '',
+    email: row.email || '',
+  });
+});
 
 function getOAuthClient() {
   return new google.auth.OAuth2(
@@ -53,6 +63,16 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       email,
     });
 
+    // Persist token to SQLite
+    db.prepare(`
+      INSERT INTO tokens (account_id, access_token, refresh_token, email)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        access_token=excluded.access_token,
+        refresh_token=excluded.refresh_token,
+        email=excluded.email
+    `).run(accountId, tokens.access_token || '', tokens.refresh_token || '', email);
+
     // Redirect back to frontend with account info
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(
@@ -69,6 +89,87 @@ router.get('/auth/token/:accountId', (req: Request, res: Response) => {
   const token = tokenStore.get(req.params.accountId as string);
   if (!token) return res.status(404).json({ error: 'Token not found' });
   res.json({ accessToken: token.accessToken });
+});
+
+// ── Microsoft / Office 365 OAuth ──────────────────────────────────────────
+
+function getMicrosoftAuthUrl(): string {
+  const clientId = process.env.MICROSOFT_CLIENT_ID;
+  const redirectUri = process.env.MICROSOFT_REDIRECT_URI || 'http://localhost:4000/api/v1/auth/microsoft/callback';
+  const scopes = [
+    'openid', 'email', 'profile', 'offline_access',
+    'https://graph.microsoft.com/User.Read',
+    'https://graph.microsoft.com/Mail.Read',
+    'https://graph.microsoft.com/Mail.Send',
+    'https://graph.microsoft.com/Mail.ReadWrite',
+  ].join(' ');
+
+  const params = new URLSearchParams({
+    client_id: clientId!,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope: scopes,
+    response_mode: 'query',
+  });
+
+  return `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}`;
+}
+
+// GET /api/v1/auth/microsoft
+router.get('/auth/microsoft', (_req: Request, res: Response) => {
+  if (!process.env.MICROSOFT_CLIENT_ID) {
+    return res.status(500).send('Microsoft OAuth not configured. Add MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET to .env');
+  }
+  res.redirect(getMicrosoftAuthUrl());
+});
+
+// GET /api/v1/auth/microsoft/callback
+router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
+  const code = req.query.code as string;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+
+  try {
+    const clientId = process.env.MICROSOFT_CLIENT_ID!;
+    const clientSecret = process.env.MICROSOFT_CLIENT_SECRET!;
+    const redirectUri = process.env.MICROSOFT_REDIRECT_URI || 'http://localhost:4000/api/v1/auth/microsoft/callback';
+
+    // Exchange code for tokens
+    const tokenRes = await axios.post(
+      'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      new URLSearchParams({
+        client_id: clientId,
+        client_secret: clientSecret,
+        code,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+
+    const { access_token, refresh_token } = tokenRes.data;
+
+    // Get user email from MS Graph
+    const userRes = await axios.get('https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName', {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+    const email = userRes.data.mail || userRes.data.userPrincipalName || '';
+
+    const accountId = `office365-${email}`;
+    tokenStore.set(accountId, { accessToken: access_token, refreshToken: refresh_token || '', email });
+
+    db.prepare(`
+      INSERT INTO tokens (account_id, access_token, refresh_token, email)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        access_token=excluded.access_token,
+        refresh_token=excluded.refresh_token,
+        email=excluded.email
+    `).run(accountId, access_token, refresh_token || '', email);
+
+    res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
+  } catch (err: any) {
+    res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
+  }
 });
 
 export default router;

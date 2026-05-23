@@ -99,6 +99,62 @@ export class GmailService {
     return { html, text };
   }
 
+  // Fast: single API call, returns first `count` IDs only
+  async fetchFirstIds(accessToken: string, count = 50): Promise<string[]> {
+    const gmail = this.getClient(accessToken);
+    const res: any = await gmail.users.messages.list({
+      userId: 'me',
+      maxResults: count,
+      labelIds: ['INBOX'],
+    });
+    return (res.data.messages || []).map((m: any) => m.id as string);
+  }
+
+  // Slow: paginates through everything — used only in background
+  async fetchAllIds(accessToken: string, skipFirst = 0): Promise<string[]> {
+    const gmail = this.getClient(accessToken);
+    const allIds: string[] = [];
+    let nextPageToken: string | undefined;
+    let fetched = 0;
+
+    do {
+      const listRes: any = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: 500,
+        labelIds: ['INBOX'],
+        ...(nextPageToken && { pageToken: nextPageToken }),
+      });
+
+      const messages = listRes.data.messages || [];
+      fetched += messages.length;
+      // skip the first `skipFirst` IDs (already shown to user)
+      if (fetched > skipFirst) {
+        const startIdx = Math.max(0, skipFirst - (fetched - messages.length));
+        allIds.push(...messages.slice(startIdx).map((m: any) => m.id as string));
+      }
+      nextPageToken = listRes.data.nextPageToken || undefined;
+    } while (nextPageToken);
+
+    return allIds;
+  }
+
+  async fetchEmailsByIds(accessToken: string, accountId: string, ids: string[]): Promise<Email[]> {
+    const gmail = this.getClient(accessToken);
+
+    const emails = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const detail = await gmail.users.messages.get({ userId: 'me', id, format: 'full' });
+          return this.parseGmailMessage(detail.data, accountId);
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    return emails.filter(Boolean) as Email[];
+  }
+
   async sendEmail(accessToken: string, payload: ComposePayload): Promise<void> {
     const gmail = this.getClient(accessToken);
 
