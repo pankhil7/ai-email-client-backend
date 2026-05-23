@@ -93,6 +93,27 @@ Body: ${body.substring(0, 3000)}`,
                 yield text;
         }
     }
+    async classifyEmail(subject, body) {
+        const response = await this.client.chat.completions.create({
+            model: MODEL,
+            max_tokens: 10,
+            messages: [
+                {
+                    role: 'user',
+                    content: `Classify this email into exactly one of these categories:
+Work, Personal, Urgent, Follow Up, Newsletter, Finance
+
+Reply with ONLY the category name, nothing else.
+
+Subject: ${subject}
+Body preview: ${body.substring(0, 500)}`,
+                },
+            ],
+        });
+        const label = response.choices[0]?.message?.content?.trim() || '';
+        const valid = ['Work', 'Personal', 'Urgent', 'Follow Up', 'Newsletter', 'Finance'];
+        return valid.includes(label) ? label : '';
+    }
     async *draftReplyStream(subject, body, fromName) {
         const stream = await this.client.chat.completions.create({
             model: MODEL,

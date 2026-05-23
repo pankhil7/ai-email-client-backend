@@ -435,6 +435,18 @@ router.post('/emails/:id/read', async (req: Request, res: Response) => {
   }
 });
 
+// POST /api/v1/ai/label — classify email into a label
+router.post('/ai/label', async (req: Request, res: Response) => {
+  const { subject, body } = req.body;
+  try {
+    const label = await aiService.classifyEmail(subject, body);
+    res.json({ label });
+  } catch (err: any) {
+    logger.error('/ai/label failed', { message: err.message, stack: err.stack });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/v1/ai/summarize
 router.post('/ai/summarize', async (req: Request, res: Response) => {
   const { subject, body } = req.body;
