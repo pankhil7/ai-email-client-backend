@@ -3,8 +3,9 @@ dotenv.config();
 
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
-import emailsRouter from './routes/emails.routes';
-import authRouter from './routes/auth.routes';
+import { initDb } from './db';
+import emailsRouter, { initAccounts } from './routes/emails.routes';
+import authRouter, { initTokenStore } from './routes/auth.routes';
 import logger from './logger';
 
 const app = express();
@@ -52,8 +53,20 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
-  logger.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
-});
+async function main() {
+  try {
+    await initDb();
+    await initTokenStore();
+    await initAccounts();
+    app.listen(PORT, () => {
+      logger.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+    });
+  } catch (err: any) {
+    logger.error('Failed to start server', { message: err.message, stack: err.stack });
+    process.exit(1);
+  }
+}
+
+main();
 
 export default app;

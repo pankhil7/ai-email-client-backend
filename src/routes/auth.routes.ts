@@ -1,21 +1,25 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 import axios from 'axios';
-import db from '../db';
+import pool from '../db';
 import logger from '../logger';
 
 const router = Router();
 
-// In-memory token store — seeded from SQLite on startup
+// In-memory token store — seeded from PostgreSQL on startup
 export const tokenStore: Map<string, { accessToken: string; refreshToken: string; email: string }> = new Map();
 
-(db.prepare('SELECT * FROM tokens').all() as any[]).forEach((row) => {
-  tokenStore.set(row.account_id, {
-    accessToken: row.access_token,
-    refreshToken: row.refresh_token || '',
-    email: row.email || '',
+export async function initTokenStore(): Promise<void> {
+  const { rows } = await pool.query('SELECT * FROM tokens');
+  rows.forEach((row: any) => {
+    tokenStore.set(row.account_id, {
+      accessToken: row.access_token,
+      refreshToken: row.refresh_token || '',
+      email: row.email || '',
+    });
   });
-});
+  logger.info('Token store seeded from DB', { count: rows.length });
+}
 
 function getOAuthClient() {
   return new google.auth.OAuth2(
@@ -65,15 +69,16 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       email,
     });
 
-    // Persist token to SQLite
-    db.prepare(`
-      INSERT INTO tokens (account_id, access_token, refresh_token, email)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(account_id) DO UPDATE SET
-        access_token=excluded.access_token,
-        refresh_token=excluded.refresh_token,
-        email=excluded.email
-    `).run(accountId, tokens.access_token || '', tokens.refresh_token || '', email);
+    // Persist token to PostgreSQL
+    await pool.query(
+      `INSERT INTO tokens (account_id, access_token, refresh_token, email)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (account_id) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         refresh_token = EXCLUDED.refresh_token,
+         email = EXCLUDED.email`,
+      [accountId, tokens.access_token || '', tokens.refresh_token || '', email]
+    );
 
     // Redirect back to frontend with account info
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -81,7 +86,7 @@ router.get('/auth/google/callback', async (req: Request, res: Response) => {
       `${frontendUrl}/auth/callback?accountId=${accountId}&email=${email}&provider=gmail`
     );
   } catch (err: any) {
-    logger.error('Gmail OAuth callback failed', { message: err.message });
+    logger.error('Gmail OAuth callback failed', { message: err.message, stack: err.stack });
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
   }
@@ -161,18 +166,19 @@ router.get('/auth/microsoft/callback', async (req: Request, res: Response) => {
     logger.info('Office365 OAuth success', { accountId, email });
     tokenStore.set(accountId, { accessToken: access_token, refreshToken: refresh_token || '', email });
 
-    db.prepare(`
-      INSERT INTO tokens (account_id, access_token, refresh_token, email)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(account_id) DO UPDATE SET
-        access_token=excluded.access_token,
-        refresh_token=excluded.refresh_token,
-        email=excluded.email
-    `).run(accountId, access_token, refresh_token || '', email);
+    await pool.query(
+      `INSERT INTO tokens (account_id, access_token, refresh_token, email)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (account_id) DO UPDATE SET
+         access_token = EXCLUDED.access_token,
+         refresh_token = EXCLUDED.refresh_token,
+         email = EXCLUDED.email`,
+      [accountId, access_token, refresh_token || '', email]
+    );
 
     res.redirect(`${frontendUrl}/auth/callback?accountId=${accountId}&email=${encodeURIComponent(email)}&provider=office365`);
   } catch (err: any) {
-    logger.error('Office365 OAuth callback failed', { message: err.message });
+    logger.error('Office365 OAuth callback failed', { message: err.message, stack: err.stack });
     res.redirect(`${frontendUrl}/auth/callback?error=${encodeURIComponent(err.message)}`);
   }
 });

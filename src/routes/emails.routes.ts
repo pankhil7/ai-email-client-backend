@@ -16,25 +16,26 @@ const imapService = new ImapService();
 const office365Service = new Office365Service();
 const aiService = new AIService();
 
-// In-memory cache loaded from SQLite on startup
+// In-memory cache loaded from PostgreSQL on startup
 const accounts: Map<string, any> = new Map();
 
-// Load persisted accounts from DB into memory
-const _rows = db.prepare('SELECT * FROM accounts').all() as any[];
-logger.info('Loaded accounts from DB', { count: _rows.length });
-_rows.forEach((row) => {
-  accounts.set(row.id, {
-    id: row.id,
-    email: row.email,
-    provider: row.provider,
-    accessToken: row.access_token,
-    refreshToken: row.refresh_token,
-    imapHost: row.imap_host,
-    imapPort: row.imap_port,
-    imapPassword: row.imap_password,
-    color: row.color,
+export async function initAccounts(): Promise<void> {
+  const { rows } = await db.query('SELECT * FROM accounts');
+  rows.forEach((row: any) => {
+    accounts.set(row.id, {
+      id: row.id,
+      email: row.email,
+      provider: row.provider,
+      accessToken: row.access_token,
+      refreshToken: row.refresh_token,
+      imapHost: row.imap_host,
+      imapPort: row.imap_port,
+      imapPassword: row.imap_password,
+      color: row.color,
+    });
   });
-});
+  logger.info('Loaded accounts from DB', { count: rows.length });
+}
 
 // Email cache: accountId -> Email[]
 const emailCache: Map<string, Email[]> = new Map();
@@ -59,10 +60,10 @@ async function getFreshAccessToken(account: any): Promise<string> {
       const newToken = credentials.access_token || '';
       logger.info('Gmail token refreshed', { accountId: account.id });
       tokenStore.set(account.id, { ...stored!, accessToken: newToken });
-      db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+      await db.query('UPDATE tokens SET access_token = $1 WHERE account_id = $2', [newToken, account.id]);
       return newToken;
     } catch (err: any) {
-      logger.error('Gmail token refresh failed', { accountId: account.id, message: err.message });
+      logger.error('Gmail token refresh failed', { accountId: account.id, message: err.message, stack: err.stack });
       return stored?.accessToken || '';
     }
   }
@@ -83,10 +84,10 @@ async function getFreshAccessToken(account: any): Promise<string> {
       const newToken = res.data.access_token || '';
       logger.info('Office365 token refreshed', { accountId: account.id });
       tokenStore.set(account.id, { ...stored!, accessToken: newToken });
-      db.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+      await db.query('UPDATE tokens SET access_token = $1 WHERE account_id = $2', [newToken, account.id]);
       return newToken;
     } catch (err: any) {
-      logger.error('Office365 token refresh failed', { accountId: account.id, message: err.message });
+      logger.error('Office365 token refresh failed', { accountId: account.id, message: err.message, stack: err.stack });
       return stored?.accessToken || '';
     }
   }
@@ -133,7 +134,7 @@ async function fetchEmailsInBackground(account: any, allIds: string[]) {
       const status = loadingStatus.get(accountId)!;
       loadingStatus.set(accountId, { ...status, loaded: status.loaded + emails.length });
     } catch (err: any) {
-      logger.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message });
+      logger.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message, stack: err.stack });
     }
   }
 
@@ -143,21 +144,22 @@ async function fetchEmailsInBackground(account: any, allIds: string[]) {
 }
 
 // POST /api/v1/accounts
-router.post('/accounts', (req: Request, res: Response) => {
+router.post('/accounts', async (req: Request, res: Response) => {
   const { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color } = req.body;
   const account = { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color };
   accounts.set(id, account);
 
-  // Persist to SQLite
-  db.prepare(`
-    INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      email=excluded.email, provider=excluded.provider,
-      access_token=excluded.access_token, refresh_token=excluded.refresh_token,
-      imap_host=excluded.imap_host, imap_port=excluded.imap_port,
-      imap_password=excluded.imap_password, color=excluded.color
-  `).run(id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null);
+  // Persist to PostgreSQL
+  await db.query(
+    `INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (id) DO UPDATE SET
+       email = EXCLUDED.email, provider = EXCLUDED.provider,
+       access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
+       imap_host = EXCLUDED.imap_host, imap_port = EXCLUDED.imap_port,
+       imap_password = EXCLUDED.imap_password, color = EXCLUDED.color`,
+    [id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null]
+  );
 
   // Clear old cache when account is re-added
   emailCache.delete(id);
@@ -172,13 +174,13 @@ router.get('/accounts', (_req: Request, res: Response) => {
 });
 
 // DELETE /api/v1/accounts/:id
-router.delete('/accounts/:id', (req: Request, res: Response) => {
+router.delete('/accounts/:id', async (req: Request, res: Response) => {
   const id = req.params.id as string;
   accounts.delete(id);
   emailCache.delete(id);
   loadingStatus.delete(id);
-  db.prepare('DELETE FROM accounts WHERE id = ?').run(id);
-  db.prepare('DELETE FROM tokens WHERE account_id = ?').run(id);
+  await db.query('DELETE FROM accounts WHERE id = $1', [id]);
+  await db.query('DELETE FROM tokens WHERE account_id = $1', [id]);
   res.json({ success: true });
 });
 

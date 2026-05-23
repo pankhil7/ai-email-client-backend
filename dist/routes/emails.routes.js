@@ -3,6 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.initAccounts = initAccounts;
 const express_1 = require("express");
 const gmail_service_1 = require("../services/gmail.service");
 const imap_service_1 = require("../services/imap.service");
@@ -18,24 +19,25 @@ const gmailService = new gmail_service_1.GmailService();
 const imapService = new imap_service_1.ImapService();
 const office365Service = new office365_service_1.Office365Service();
 const aiService = new ai_service_1.AIService();
-// In-memory cache loaded from SQLite on startup
+// In-memory cache loaded from PostgreSQL on startup
 const accounts = new Map();
-// Load persisted accounts from DB into memory
-const _rows = db_1.default.prepare('SELECT * FROM accounts').all();
-logger_1.default.info('Loaded accounts from DB', { count: _rows.length });
-_rows.forEach((row) => {
-    accounts.set(row.id, {
-        id: row.id,
-        email: row.email,
-        provider: row.provider,
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token,
-        imapHost: row.imap_host,
-        imapPort: row.imap_port,
-        imapPassword: row.imap_password,
-        color: row.color,
+async function initAccounts() {
+    const { rows } = await db_1.default.query('SELECT * FROM accounts');
+    rows.forEach((row) => {
+        accounts.set(row.id, {
+            id: row.id,
+            email: row.email,
+            provider: row.provider,
+            accessToken: row.access_token,
+            refreshToken: row.refresh_token,
+            imapHost: row.imap_host,
+            imapPort: row.imap_port,
+            imapPassword: row.imap_password,
+            color: row.color,
+        });
     });
-});
+    logger_1.default.info('Loaded accounts from DB', { count: rows.length });
+}
 // Email cache: accountId -> Email[]
 const emailCache = new Map();
 // Loading status per account: accountId -> { loading, total, loaded }
@@ -52,11 +54,11 @@ async function getFreshAccessToken(account) {
             const newToken = credentials.access_token || '';
             logger_1.default.info('Gmail token refreshed', { accountId: account.id });
             auth_routes_1.tokenStore.set(account.id, { ...stored, accessToken: newToken });
-            db_1.default.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+            await db_1.default.query('UPDATE tokens SET access_token = $1 WHERE account_id = $2', [newToken, account.id]);
             return newToken;
         }
         catch (err) {
-            logger_1.default.error('Gmail token refresh failed', { accountId: account.id, message: err.message });
+            logger_1.default.error('Gmail token refresh failed', { accountId: account.id, message: err.message, stack: err.stack });
             return stored?.accessToken || '';
         }
     }
@@ -72,11 +74,11 @@ async function getFreshAccessToken(account) {
             const newToken = res.data.access_token || '';
             logger_1.default.info('Office365 token refreshed', { accountId: account.id });
             auth_routes_1.tokenStore.set(account.id, { ...stored, accessToken: newToken });
-            db_1.default.prepare('UPDATE tokens SET access_token = ? WHERE account_id = ?').run(newToken, account.id);
+            await db_1.default.query('UPDATE tokens SET access_token = $1 WHERE account_id = $2', [newToken, account.id]);
             return newToken;
         }
         catch (err) {
-            logger_1.default.error('Office365 token refresh failed', { accountId: account.id, message: err.message });
+            logger_1.default.error('Office365 token refresh failed', { accountId: account.id, message: err.message, stack: err.stack });
             return stored?.accessToken || '';
         }
     }
@@ -116,7 +118,7 @@ async function fetchEmailsInBackground(account, allIds) {
             loadingStatus.set(accountId, { ...status, loaded: status.loaded + emails.length });
         }
         catch (err) {
-            logger_1.default.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message });
+            logger_1.default.warn('Background fetch chunk failed', { accountId, chunk: i, message: err.message, stack: err.stack });
         }
     }
     const status = loadingStatus.get(accountId);
@@ -124,20 +126,18 @@ async function fetchEmailsInBackground(account, allIds) {
     logger_1.default.info('Background fetch complete', { accountId, loaded: status.loaded });
 }
 // POST /api/v1/accounts
-router.post('/accounts', (req, res) => {
+router.post('/accounts', async (req, res) => {
     const { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color } = req.body;
     const account = { id, email, provider, accessToken, refreshToken, imapHost, imapPort, imapPassword, color };
     accounts.set(id, account);
-    // Persist to SQLite
-    db_1.default.prepare(`
-    INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      email=excluded.email, provider=excluded.provider,
-      access_token=excluded.access_token, refresh_token=excluded.refresh_token,
-      imap_host=excluded.imap_host, imap_port=excluded.imap_port,
-      imap_password=excluded.imap_password, color=excluded.color
-  `).run(id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null);
+    // Persist to PostgreSQL
+    await db_1.default.query(`INSERT INTO accounts (id, email, provider, access_token, refresh_token, imap_host, imap_port, imap_password, color)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     ON CONFLICT (id) DO UPDATE SET
+       email = EXCLUDED.email, provider = EXCLUDED.provider,
+       access_token = EXCLUDED.access_token, refresh_token = EXCLUDED.refresh_token,
+       imap_host = EXCLUDED.imap_host, imap_port = EXCLUDED.imap_port,
+       imap_password = EXCLUDED.imap_password, color = EXCLUDED.color`, [id, email, provider, accessToken ?? null, refreshToken ?? null, imapHost ?? null, imapPort ?? null, imapPassword ?? null, color ?? null]);
     // Clear old cache when account is re-added
     emailCache.delete(id);
     loadingStatus.delete(id);
@@ -148,13 +148,13 @@ router.get('/accounts', (_req, res) => {
     res.json(Array.from(accounts.values()).map(({ imapPassword, accessToken, ...safe }) => safe));
 });
 // DELETE /api/v1/accounts/:id
-router.delete('/accounts/:id', (req, res) => {
+router.delete('/accounts/:id', async (req, res) => {
     const id = req.params.id;
     accounts.delete(id);
     emailCache.delete(id);
     loadingStatus.delete(id);
-    db_1.default.prepare('DELETE FROM accounts WHERE id = ?').run(id);
-    db_1.default.prepare('DELETE FROM tokens WHERE account_id = ?').run(id);
+    await db_1.default.query('DELETE FROM accounts WHERE id = $1', [id]);
+    await db_1.default.query('DELETE FROM tokens WHERE account_id = $1', [id]);
     res.json({ success: true });
 });
 // GET /api/v1/emails — returns first 50 immediately, kicks off background jobs

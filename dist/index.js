@@ -40,8 +40,9 @@ const dotenv = __importStar(require("dotenv"));
 dotenv.config();
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
-const emails_routes_1 = __importDefault(require("./routes/emails.routes"));
-const auth_routes_1 = __importDefault(require("./routes/auth.routes"));
+const db_1 = require("./db");
+const emails_routes_1 = __importStar(require("./routes/emails.routes"));
+const auth_routes_1 = __importStar(require("./routes/auth.routes"));
 const logger_1 = __importDefault(require("./logger"));
 const app = (0, express_1.default)();
 const PORT = process.env.PORT || 4000;
@@ -81,7 +82,19 @@ app.use((err, _req, res, _next) => {
     logger_1.default.error('Unhandled error', { message: err.message, stack: err.stack });
     res.status(500).json({ error: 'Internal server error' });
 });
-app.listen(PORT, () => {
-    logger_1.default.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
-});
+async function main() {
+    try {
+        await (0, db_1.initDb)();
+        await (0, auth_routes_1.initTokenStore)();
+        await (0, emails_routes_1.initAccounts)();
+        app.listen(PORT, () => {
+            logger_1.default.info(`AI Email Backend running`, { port: PORT, env: process.env.NODE_ENV || 'development' });
+        });
+    }
+    catch (err) {
+        logger_1.default.error('Failed to start server', { message: err.message, stack: err.stack });
+        process.exit(1);
+    }
+}
+main();
 exports.default = app;
